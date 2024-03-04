@@ -27,6 +27,19 @@ from torchrl.envs.libs.gym import GymEnv
 from torchrl.record.loggers import generate_exp_name, get_logger
 from torchrl.modules import MLP
 
+class PlaceCellActivation:
+    def __init__(self):
+        self.place_cell_centers = torch.load("place_cell_centers.pt")
+        self.place_cell_scale = 3
+
+    def score(self, loc: torch.Tensor):
+        place_cell_scores = torch.linalg.vector_norm(self.place_cell_centers - loc, dim=-1)**2
+        place_cell_scores = -place_cell_scores / (2 * self.place_cell_scale ** 2)
+        return place_cell_scores
+#        all_exponents = torch.logsumexp(place_cell_scores, dim=-1)
+#        normalized_scores = place_cell_scores - all_exponents
+#        place_cell_activations = torch.exp(normalized_scores)
+
 def create_sample(dat):
     t0_state = dat['observation'][:, 0] #t0
     t1_state = dat['observation'][:, 1] #t1
@@ -50,18 +63,18 @@ def create_sample(dat):
     T_input = T_input
     t0_state = t0_state
     # State + Vel + Rot
-    #source_diff = torch.cat((t0_state, T_input, R_input), dim=1)
+    source_diff = torch.cat((t0_state, T_input, R_input), dim=1)
     # State + Vel
     #source_diff = torch.cat((t0_state, T_input), dim=1)
     # State + Rot
     #source_diff = torch.cat((t0_state, R_input), dim=1)
     # State
-    source_diff = t0_state
-
-    target_trans = t1_state
-    target_rot = (t1_state - t0_state) / torch.norm(t1_state - t0_state, dim=1).unsqueeze(1)
-    target = torch.cat((target_trans, target_rot), dim=-1)
-    return source_diff, target
+    #source_diff = t0_state
+    target_state = t1_state
+#    target_trans = t1_state
+#    target_rot = (t1_state - t0_state) / torch.norm(t1_state - t0_state, dim=1).unsqueeze(1)
+#    target = torch.cat((target_trans, target_rot), dim=-1)
+    return source_diff, target_state
 
 @hydra.main(config_path=".", config_name="path_integration_predict", version_base="1.1")
 def main(cfg: "DictConfig"):  # noqa: F821
@@ -107,14 +120,9 @@ def main(cfg: "DictConfig"):  # noqa: F821
     dat = train_replay_buffer.sample(100) #should be 2 full trajectories
     test_trajs = dat.reshape((1, -1))
     test_input, test_target = create_sample(test_trajs)
-    # State + Vel + Rot
-    #model = MLP(in_features = 37, out_features = 8, num_cells = [64, 64])
-    # State + Vel
-    #model = MLP(in_features = 9, out_features = 8, num_cells = [64, 64])
-    # State + Rot
-    #model = MLP(in_features = 36, out_features = 8, num_cells = [64, 64])
-    # State
-    model = MLP(in_features = test_input.shape[-1], out_features = 16, num_cells = [64, 64], dropout=0.5)
+    energy_scorer = PlaceCellActivation()
+    test_energy = energy_scorer(test_target)
+    model = MLP(in_features = test_input.shape[-1], out_features = test_energy.shape[-1], num_cells = [64, 64])
 
     model = model.to(device)
     params = TensorDict.from_module(model)
@@ -128,8 +136,9 @@ def main(cfg: "DictConfig"):  # noqa: F821
         dat = dat.reshape((slice_count_in_batch, -1))
 
         input, target = create_sample(dat)
+        target_energy = energy_scorer(target)
         input = input.to(device)
-        target = target.to(device)
+        target_energy = target.to(device)
 #        source_diff = t0_state
         with params.to_module(model):
             predict = model(input)
