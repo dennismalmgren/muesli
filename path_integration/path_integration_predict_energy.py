@@ -1,5 +1,6 @@
 import time
 import sys
+from typing import Tuple
 
 import torch.optim
 import tqdm
@@ -21,6 +22,7 @@ from torchrl.envs import (
     VecNorm,
     
 )
+
 from torchrl.collectors.utils import split_trajectories
 from torchrl.envs.utils import RandomPolicy
 from torchrl.envs.libs.gym import GymEnv
@@ -32,11 +34,17 @@ from torch import nn
 class PlaceCellActivation(nn.Module):
     def __init__(self, device):
         super().__init__()
-        self.place_cell_centers = torch.load("/home/dennismalmgren/repos/muesli/path_integration/place_cell_centers.pt").to(device)
-#        self.place_cell_centers = torch.load("/mnt/f/repos/muesli/path_integration/place_cell_centers.pt").to(device)
+    #    self.place_cell_centers = torch.load("/home/dennismalmgren/repos/muesli/path_integration/place_cell_centers.pt").to(device)
+        self.place_cell_centers = torch.load("/mnt/f/repos/muesli/path_integration/place_cell_centers.pt").to(device)
         self.place_cell_centers = self.place_cell_centers.unsqueeze(0)
         self.place_cell_scale = 3
 
+        self._place_cell_activation_dim = self.place_cell_centers.shape[1]
+
+    @property
+    def place_cell_activation_dim(self):
+        return self._place_cell_activation_dim
+    
     def forward(self, loc: torch.Tensor):
         loc = loc.unsqueeze(-2)
         place_cell_scores = torch.linalg.vector_norm(self.place_cell_centers - loc, dim=-1)**2
@@ -46,6 +54,57 @@ class PlaceCellActivation(nn.Module):
         place_cell_activations = torch.exp(normalized_scores)
         return place_cell_activations
     
+class HeadCellActivation(nn.Module):
+    def __init__(self, device):
+        super().__init__()
+        #self.head_cell_centers = torch.load("/home/dennismalmgren/repos/muesli/path_integration/head_cell_centers.pt").to(device)
+        self.head_cell_centers = torch.load("/mnt/f/repos/muesli/path_integration/head_cell_centers.pt").to(device)
+        self.head_cell_centers = self.head_cell_centers / torch.linalg.norm(self.head_cell_centers, dim=-1, keepdim=True)
+        self.head_cell_centers = self.head_cell_centers.unsqueeze(0)
+
+        self.head_cell_concentration = 15  # 20 degrees in radians
+        self._head_cell_activation_dim = self.head_cell_centers.shape[1]
+
+    @property
+    def head_cell_activation_dim(self):
+        return self._head_cell_activation_dim
+    
+    def forward(self, heading: torch.Tensor):
+        heading = heading.unsqueeze(-2)
+        heading = heading / torch.norm(heading)
+        head_cell_scores = torch.linalg.vecdot(heading, self.head_cell_centers)
+        head_cell_scores = self.head_cell_concentration * head_cell_scores
+        all_exponents = torch.logsumexp(head_cell_scores, dim=-1, keepdim=True)
+        normalized_scores = head_cell_scores - all_exponents
+        head_cell_activations = torch.exp(normalized_scores)
+        return head_cell_activations
+
+class PlaceHeadPredictionLoss(nn.Module):
+    def __init__(self, device):
+        super().__init__()
+        self.ce_loss = nn.CrossEntropyLoss()
+        self.place_cell_activation = PlaceCellActivation(device)
+        self.head_cell_activation = HeadCellActivation(device)
+        self.device = device
+
+    def forward(self, input: torch.Tensor, targets: Tuple[torch.Tensor]):
+        head_predictions = input[:, :self.head_cell_activation.head_cell_activation_dim]
+        place_predictions = input[:, self.head_cell_activation.head_cell_activation_dim:]
+        place, heading = targets
+        place = place.to(self.device)
+        heading = heading.to(self.device)
+        place_activations = self.place_cell_activation(place)
+        head_activations = self.head_cell_activation(heading)
+        place_loss = self.ce_loss(place_predictions, place_activations)
+        head_loss = self.ce_loss(head_predictions, head_activations)
+        loss = place_loss + head_loss
+        losses = {
+            "place_loss": place_loss,
+            "head_loss": head_loss,
+            "loss": loss
+        }
+        return losses
+
 def create_sample(dat, device):
     t0_state = dat['observation'][:, 0] #t0
     t1_state = dat['observation'][:, 1] #t1
@@ -76,7 +135,7 @@ def create_sample(dat, device):
     #source_diff = torch.cat((t0_state, R_input), dim=1)
     # State
     #source = t0_state
-    target_state = t1_state
+    target_state = t1_state, t1_state - t0_state
 #    target_trans = t1_state
 #    target_rot = (t1_state - t0_state) / torch.norm(t1_state - t0_state, dim=1).unsqueeze(1)
 #    target = torch.cat((target_trans, target_rot), dim=-1)
@@ -127,40 +186,47 @@ def main(cfg: "DictConfig"):  # noqa: F821
     dat = train_replay_buffer.sample(100) #should be 2 full trajectories
     dat = dat.to(device)
     test_trajs = dat.reshape((1, -1))
-    test_input, test_target = create_sample(test_trajs, device)
-    energy_scorer = PlaceCellActivation(device)
-    test_energy = energy_scorer(test_target)
-    model = MLP(in_features = test_input.shape[-1], out_features = test_energy.shape[-1], num_cells = [64, 64], dropout=0.5)
+    test_input, (test_target, test_heading) = create_sample(test_trajs, device)
+    test_place_cell_activation = PlaceCellActivation(device)
+    test_head_cell_activation = HeadCellActivation(device)
+
+    test_place_cell_activation = test_place_cell_activation(test_target)
+    test_head_cell_activation = test_head_cell_activation(test_heading)
+
+    model = MLP(in_features = test_input.shape[-1], 
+                out_features = test_place_cell_activation.shape[-1] + test_head_cell_activation.shape[-1], 
+                num_cells = [256, 256])
 
     model = model.to(device)
     params = TensorDict.from_module(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    loss_module = torch.nn.CrossEntropyLoss()
+    loss_module = PlaceHeadPredictionLoss(device)
 
     pretrain_gradient_steps = 100000
- #   dat = train_replay_buffer.sample(batch_size)
- #   dat = dat.reshape((slice_count_in_batch, -1))
+    dat = train_replay_buffer.sample(batch_size)
+    dat = dat.reshape((slice_count_in_batch, -1))
+    dat = dat.to(device)
     for step in range(pretrain_gradient_steps):
         log_info = {}
-
-        dat = train_replay_buffer.sample(batch_size)
-        dat = dat.to(device)
-        dat = dat.reshape((slice_count_in_batch, -1))
+#        dat = train_replay_buffer.sample(batch_size)
+#        dat = dat.to(device)
+#        dat = dat.reshape((slice_count_in_batch, -1))
         input, target = create_sample(dat, device)
-        target = energy_scorer(target)
         input = input.to(device)
-        target = target.to(device)
-#        source_diff = t0_state
         with params.to_module(model):
             predict = model(input)
-        loss = loss_module(predict, target)
-
+        loss_dict = loss_module(predict, target)
+        head_loss = loss_dict["head_loss"]
+        place_loss = loss_dict["place_loss"]
+        loss = loss_dict["loss"]
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         log_info.update(
             {
                 "loss": loss.item(),
+                "heading_loss": head_loss.item(),
+                "place_loss": place_loss.item(),
             }
         )
         for key, value in log_info.items():
@@ -170,21 +236,31 @@ def main(cfg: "DictConfig"):  # noqa: F821
     model.eval()
     eval_steps = 10
     eval_losses = []
+    eval_head_losses = []
+    eval_place_losses = []
     for i in range(eval_steps):
         dat = train_replay_buffer.sample(batch_size)
         dat = dat.reshape((slice_count_in_batch, -1))
         dat = dat.to(device)
         input, target = create_sample(dat, device)
-        target = energy_scorer(target)
         input = input.to(device)
-        target = target.to(device)
-        predict = model(input)
-        loss = loss_module(predict, target)
+        with params.to_module(model):
+            predict = model(input)
+        loss_dict = loss_module(predict, target)
+        loss = loss_dict["loss"]
+        head_loss = loss_dict["head_loss"]
+        place_loss = loss_dict["place_loss"]
         eval_losses.append(loss)
+        eval_head_losses.append(head_loss)
+        eval_place_losses.append(place_loss)
+
     print("Evaluation loss: ", sum(eval_losses) / len(eval_losses))
-    #start with just predicting the next state.
+    print("Evaluation head loss: ", sum(eval_head_losses) / len(eval_head_losses))
+    print("Evaluation place loss: ", sum(eval_place_losses) / len(eval_place_losses))
 
     logger.experiment.summary["eval_loss"] = (sum(eval_losses) / len(eval_losses)).item()
+    logger.experiment.summary["eval_head_loss"] = (sum(eval_head_losses) / len(eval_head_losses)).item()
+    logger.experiment.summary["eval_place_loss"] = (sum(eval_place_losses) / len(eval_losses)).item()
     params.memmap("model_state")
     #start with working with just the first 100 time steps.
     #these seem to range from -10 to 10.
