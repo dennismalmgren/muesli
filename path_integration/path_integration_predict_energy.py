@@ -26,13 +26,18 @@ from torchrl.envs.utils import RandomPolicy
 from torchrl.envs.libs.gym import GymEnv
 from torchrl.record.loggers import generate_exp_name, get_logger
 from torchrl.modules import MLP
+from torch import nn
 
-class PlaceCellActivation:
+
+class PlaceCellActivation(nn.Module):
     def __init__(self):
-        self.place_cell_centers = torch.load("place_cell_centers.pt")
+        super().__init__()
+        self.place_cell_centers = torch.load("/mnt/f/repos/muesli/path_integration/place_cell_centers.pt")
+        self.place_cell_centers = self.place_cell_centers.unsqueeze(0)
         self.place_cell_scale = 3
 
-    def score(self, loc: torch.Tensor):
+    def forward(self, loc: torch.Tensor):
+        loc = loc.unsqueeze(-2)
         place_cell_scores = torch.linalg.vector_norm(self.place_cell_centers - loc, dim=-1)**2
         place_cell_scores = -place_cell_scores / (2 * self.place_cell_scale ** 2)
         return place_cell_scores
@@ -136,9 +141,9 @@ def main(cfg: "DictConfig"):  # noqa: F821
         dat = dat.reshape((slice_count_in_batch, -1))
 
         input, target = create_sample(dat)
-        target_energy = energy_scorer(target)
+        target = energy_scorer(target)
         input = input.to(device)
-        target_energy = target.to(device)
+        target = target.to(device)
 #        source_diff = t0_state
         with params.to_module(model):
             predict = model(input)
@@ -163,6 +168,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
         dat = train_replay_buffer.sample(batch_size)
         dat = dat.reshape((slice_count_in_batch, -1))
         input, target = create_sample(dat)
+        target = energy_scorer(target)
         input = input.to(device)
         target = target.to(device)
         predict = model(input)
