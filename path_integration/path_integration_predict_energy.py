@@ -30,9 +30,10 @@ from torch import nn
 
 
 class PlaceCellActivation(nn.Module):
-    def __init__(self):
+    def __init__(self, device):
         super().__init__()
-        self.place_cell_centers = torch.load("/home/dennismalmgren/repos/muesli/path_integration/place_cell_centers.pt")
+#        self.place_cell_centers = torch.load("/home/dennismalmgren/repos/muesli/path_integration/place_cell_centers.pt")
+        self.place_cell_centers = torch.load("/mnt/f/repos/muesli/path_integration/place_cell_centers.pt").to(device)
         self.place_cell_centers = self.place_cell_centers.unsqueeze(0)
         self.place_cell_scale = 3
 
@@ -45,12 +46,12 @@ class PlaceCellActivation(nn.Module):
         place_cell_activations = torch.exp(normalized_scores)
         return place_cell_activations
     
-def create_sample(dat):
+def create_sample(dat, device):
     t0_state = dat['observation'][:, 0] #t0
     t1_state = dat['observation'][:, 1] #t1
     u = t0_state / torch.linalg.vector_norm(t0_state, dim=1).unsqueeze(1)
     v = t1_state / torch.linalg.vector_norm(t1_state, dim=1).unsqueeze(1)
-    I = torch.eye(u.shape[-1]).unsqueeze(0)
+    I = torch.eye(u.shape[-1], device=device).unsqueeze(0)
     u_plus_v = u + v
     u_plus_v = u_plus_v.unsqueeze(-1)
     uv = torch.linalg.vecdot(u, v)
@@ -68,13 +69,13 @@ def create_sample(dat):
     T_input = T_input
     t0_state = t0_state
     # State + Vel + Rot
-    source = torch.cat((t0_state, T_input, R_input), dim=1)
+    #source = torch.cat((t0_state, T_input, R_input), dim=1)
     # State + Vel
     #source_diff = torch.cat((t0_state, T_input), dim=1)
     # State + Rot
     #source_diff = torch.cat((t0_state, R_input), dim=1)
     # State
-    #source = t0_state
+    source = t0_state
     target_state = t1_state
 #    target_trans = t1_state
 #    target_rot = (t1_state - t0_state) / torch.norm(t1_state - t0_state, dim=1).unsqueeze(1)
@@ -95,7 +96,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     storage_size = trajectory_count * trajectory_length
     train_sampler = SliceSampler(slice_len=slice_len)
     train_replay_buffer = TensorDictReplayBuffer(
-        storage=LazyMemmapStorage(storage_size),
+        storage=LazyMemmapStorage(storage_size, device=device),
         sampler=train_sampler,
     #    batch_size=batch_size,
     )
@@ -122,12 +123,13 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 "mode": cfg.logger.mode
             },
         )
+
     dat = train_replay_buffer.sample(100) #should be 2 full trajectories
     test_trajs = dat.reshape((1, -1))
-    test_input, test_target = create_sample(test_trajs)
-    energy_scorer = PlaceCellActivation()
+    test_input, test_target = create_sample(test_trajs, device)
+    energy_scorer = PlaceCellActivation(device)
     test_energy = energy_scorer(test_target)
-    model = MLP(in_features = test_input.shape[-1], out_features = test_energy.shape[-1], num_cells = [64, 64])
+    model = MLP(in_features = test_input.shape[-1], out_features = test_energy.shape[-1], num_cells = [64, 64], dropout=0.5)
 
     model = model.to(device)
     params = TensorDict.from_module(model)
@@ -142,7 +144,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
 
         dat = train_replay_buffer.sample(batch_size)
         dat = dat.reshape((slice_count_in_batch, -1))
-        input, target = create_sample(dat)
+        input, target = create_sample(dat, device)
         target = energy_scorer(target)
         input = input.to(device)
         target = target.to(device)
