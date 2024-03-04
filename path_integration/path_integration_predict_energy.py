@@ -32,7 +32,7 @@ from torch import nn
 class PlaceCellActivation(nn.Module):
     def __init__(self):
         super().__init__()
-        self.place_cell_centers = torch.load("/mnt/f/repos/muesli/path_integration/place_cell_centers.pt")
+        self.place_cell_centers = torch.load("/home/dennismalmgren/repos/muesli/path_integration/place_cell_centers.pt")
         self.place_cell_centers = self.place_cell_centers.unsqueeze(0)
         self.place_cell_scale = 3
 
@@ -40,11 +40,11 @@ class PlaceCellActivation(nn.Module):
         loc = loc.unsqueeze(-2)
         place_cell_scores = torch.linalg.vector_norm(self.place_cell_centers - loc, dim=-1)**2
         place_cell_scores = -place_cell_scores / (2 * self.place_cell_scale ** 2)
-        return place_cell_scores
-#        all_exponents = torch.logsumexp(place_cell_scores, dim=-1)
-#        normalized_scores = place_cell_scores - all_exponents
-#        place_cell_activations = torch.exp(normalized_scores)
-
+        all_exponents = torch.logsumexp(place_cell_scores, dim=-1, keepdim=True)
+        normalized_scores = place_cell_scores - all_exponents
+        place_cell_activations = torch.exp(normalized_scores)
+        return place_cell_activations
+    
 def create_sample(dat):
     t0_state = dat['observation'][:, 0] #t0
     t1_state = dat['observation'][:, 1] #t1
@@ -68,18 +68,18 @@ def create_sample(dat):
     T_input = T_input
     t0_state = t0_state
     # State + Vel + Rot
-    source_diff = torch.cat((t0_state, T_input, R_input), dim=1)
+    source = torch.cat((t0_state, T_input, R_input), dim=1)
     # State + Vel
     #source_diff = torch.cat((t0_state, T_input), dim=1)
     # State + Rot
     #source_diff = torch.cat((t0_state, R_input), dim=1)
     # State
-    #source_diff = t0_state
+    #source = t0_state
     target_state = t1_state
 #    target_trans = t1_state
 #    target_rot = (t1_state - t0_state) / torch.norm(t1_state - t0_state, dim=1).unsqueeze(1)
 #    target = torch.cat((target_trans, target_rot), dim=-1)
-    return source_diff, target_state
+    return source, target_state
 
 @hydra.main(config_path=".", config_name="path_integration_predict", version_base="1.1")
 def main(cfg: "DictConfig"):  # noqa: F821
@@ -132,14 +132,16 @@ def main(cfg: "DictConfig"):  # noqa: F821
     model = model.to(device)
     params = TensorDict.from_module(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    loss_module = torch.nn.MSELoss()
+    loss_module = torch.nn.CrossEntropyLoss()
 
     pretrain_gradient_steps = 100000
+ #   dat = train_replay_buffer.sample(batch_size)
+ #   dat = dat.reshape((slice_count_in_batch, -1))
     for step in range(pretrain_gradient_steps):
         log_info = {}
+
         dat = train_replay_buffer.sample(batch_size)
         dat = dat.reshape((slice_count_in_batch, -1))
-
         input, target = create_sample(dat)
         target = energy_scorer(target)
         input = input.to(device)
