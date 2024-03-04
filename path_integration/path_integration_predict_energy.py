@@ -32,8 +32,8 @@ from torch import nn
 class PlaceCellActivation(nn.Module):
     def __init__(self, device):
         super().__init__()
-#        self.place_cell_centers = torch.load("/home/dennismalmgren/repos/muesli/path_integration/place_cell_centers.pt")
-        self.place_cell_centers = torch.load("/mnt/f/repos/muesli/path_integration/place_cell_centers.pt").to(device)
+        self.place_cell_centers = torch.load("/home/dennismalmgren/repos/muesli/path_integration/place_cell_centers.pt").to(device)
+#        self.place_cell_centers = torch.load("/mnt/f/repos/muesli/path_integration/place_cell_centers.pt").to(device)
         self.place_cell_centers = self.place_cell_centers.unsqueeze(0)
         self.place_cell_scale = 3
 
@@ -69,13 +69,13 @@ def create_sample(dat, device):
     T_input = T_input
     t0_state = t0_state
     # State + Vel + Rot
-    #source = torch.cat((t0_state, T_input, R_input), dim=1)
+    source = torch.cat((t0_state, T_input, R_input), dim=1)
     # State + Vel
     #source_diff = torch.cat((t0_state, T_input), dim=1)
     # State + Rot
     #source_diff = torch.cat((t0_state, R_input), dim=1)
     # State
-    source = t0_state
+    #source = t0_state
     target_state = t1_state
 #    target_trans = t1_state
 #    target_rot = (t1_state - t0_state) / torch.norm(t1_state - t0_state, dim=1).unsqueeze(1)
@@ -96,7 +96,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     storage_size = trajectory_count * trajectory_length
     train_sampler = SliceSampler(slice_len=slice_len)
     train_replay_buffer = TensorDictReplayBuffer(
-        storage=LazyMemmapStorage(storage_size, device=device),
+        storage=LazyMemmapStorage(storage_size),
         sampler=train_sampler,
     #    batch_size=batch_size,
     )
@@ -125,6 +125,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
         )
 
     dat = train_replay_buffer.sample(100) #should be 2 full trajectories
+    dat = dat.to(device)
     test_trajs = dat.reshape((1, -1))
     test_input, test_target = create_sample(test_trajs, device)
     energy_scorer = PlaceCellActivation(device)
@@ -143,6 +144,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
         log_info = {}
 
         dat = train_replay_buffer.sample(batch_size)
+        dat = dat.to(device)
         dat = dat.reshape((slice_count_in_batch, -1))
         input, target = create_sample(dat, device)
         target = energy_scorer(target)
@@ -171,7 +173,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
     for i in range(eval_steps):
         dat = train_replay_buffer.sample(batch_size)
         dat = dat.reshape((slice_count_in_batch, -1))
-        input, target = create_sample(dat)
+        dat = dat.to(device)
+        input, target = create_sample(dat, device)
         target = energy_scorer(target)
         input = input.to(device)
         target = target.to(device)
