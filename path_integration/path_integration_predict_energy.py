@@ -144,11 +144,11 @@ def create_sample(dat, device):
 @hydra.main(config_path=".", config_name="path_integration_predict", version_base="1.1")
 def main(cfg: "DictConfig"):  # noqa: F821
     device = "cpu" if not torch.cuda.device_count() else "cuda"
-    num_episodes = 100
-    trajectory_length = 100
+    num_episodes = 1000
+    trajectory_length = 1000
     trajectory_count = trajectory_length * num_episodes
-    slice_len = 100 #use first two to predict the third
-    slice_count_in_batch = 100
+    slice_len = 2 #use first to predict the second
+    slice_count_in_batch = 1000
     batch_size = slice_len * slice_count_in_batch
 #    num_slices = 64 #per sample, how many trajectories.
 #    batch_size = num_slices * trajectory_length
@@ -164,8 +164,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
         project_root_path = "../../../"
     else:
         project_root_path = "../../../../"
-    train_replay_buffer.loads(project_root_path + "train_buffer")
-    
+    train_replay_buffer.loads(project_root_path + "trainbuffer")
+    train_replay_buffer.sample(batch_size=batch_size) #1000 slices
 
     # Create logger
     logger = None
@@ -183,7 +183,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
             },
         )
 
-    dat = train_replay_buffer.sample(100) #should be 2 full trajectories
+    dat = train_replay_buffer.sample(batch_size) #should be 2 full trajectories
     dat = dat.to(device)
     test_trajs = dat.reshape((1, -1))
     test_input, (test_target, test_heading) = create_sample(test_trajs, device)
@@ -199,18 +199,16 @@ def main(cfg: "DictConfig"):  # noqa: F821
 
     model = model.to(device)
     params = TensorDict.from_module(model)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     loss_module = PlaceHeadPredictionLoss(device)
 
     pretrain_gradient_steps = 100000
-    dat = train_replay_buffer.sample(batch_size)
-    dat = dat.reshape((slice_count_in_batch, -1))
-    dat = dat.to(device)
     for step in range(pretrain_gradient_steps):
         log_info = {}
-#        dat = train_replay_buffer.sample(batch_size)
-#        dat = dat.to(device)
-#        dat = dat.reshape((slice_count_in_batch, -1))
+        dat = train_replay_buffer.sample(batch_size)
+        dat = dat.reshape((slice_count_in_batch, -1))
+        dat = dat.to(device)
+
         input, target = create_sample(dat, device)
         input = input.to(device)
         with params.to_module(model):
