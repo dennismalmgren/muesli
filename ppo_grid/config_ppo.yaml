@@ -5,13 +5,13 @@ env:
 # collector
 collector:
   frames_per_batch: 1000
-  total_frames: 100000
+  total_frames: 1000000
 
 # logger
 logger:
   backend: wandb
   project_name: PPO_Muesli_Comparison
-  group_name: null
+  group_name: PPO_Grid
   exp_name: Mujoco_PPO_Grid
   test_interval: 10_000
   num_test_episodes: 5
