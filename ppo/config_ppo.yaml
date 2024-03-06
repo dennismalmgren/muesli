@@ -4,14 +4,14 @@ env:
 
 # collector
 collector:
-  frames_per_batch: 1000
-  total_frames: 1000000
+  frames_per_batch: 2048
+  total_frames: 1_000_000
 
 # logger
 logger:
   backend: wandb
   project_name: PPO_Muesli_Comparison
-  group_name: PPO
+  group_name: PPO_transformed
   exp_name: Mujoco_PPO
   test_interval: 10_000
   num_test_episodes: 5
@@ -27,7 +27,7 @@ optim:
 # loss
 loss:
   gamma: 0.99
-  mini_batch_size: 200
+  mini_batch_size: 64
   ppo_epochs: 10
   gae_lambda: 0.95
   clip_epsilon: 0.2
