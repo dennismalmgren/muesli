@@ -141,32 +141,17 @@ def create_sample(dat, device):
 #    target = torch.cat((target_trans, target_rot), dim=-1)
     return source, target_state
 
-@hydra.main(config_path=".", config_name="path_integration_predict", version_base="1.1")
-def main(cfg: "DictConfig"):  # noqa: F821
-    device = "cpu" if not torch.cuda.device_count() else "cuda"
-    num_episodes = 1000
-    trajectory_length = 1000
-    trajectory_count = trajectory_length * num_episodes
-    slice_len = 2 #use first to predict the second
-    slice_count_in_batch = 1000
-    batch_size = slice_len * slice_count_in_batch
-#    num_slices = 64 #per sample, how many trajectories.
-#    batch_size = num_slices * trajectory_length
-    storage_size = trajectory_count * trajectory_length
-    train_sampler = SliceSampler(slice_len=slice_len)
-    train_replay_buffer = TensorDictReplayBuffer(
-        storage=LazyMemmapStorage(storage_size),
-        sampler=train_sampler,
-    #    batch_size=batch_size,
-    )
+def get_project_root_path_vscode():
     trace_object = getattr(sys, 'gettrace', lambda: None)() #vscode debugging
     if trace_object is not None:
-        project_root_path = "../../../"
+        return "../../../"
     else:
-        project_root_path = "../../../../"
-    train_replay_buffer.loads(project_root_path + "trainbuffer")
-    train_replay_buffer.sample(batch_size=batch_size) #1000 slices
-
+        return "../../../../"
+    
+@hydra.main(config_path=".", config_name="path_integration_predict", version_base="1.1")
+def main(cfg: "DictConfig"):  # noqa: F821
+    device = "cpu"# if not torch.cuda.device_count() else "cuda"
+  
     # Create logger
     logger = None
     if cfg.logger.backend:
@@ -183,52 +168,36 @@ def main(cfg: "DictConfig"):  # noqa: F821
             },
         )
 
-    dat = train_replay_buffer.sample(batch_size) #should be 2 full trajectories
-    dat = dat.to(device)
-    test_trajs = dat.reshape((1, -1))
-    test_input, (test_target, test_heading) = create_sample(test_trajs, device)
-    test_place_cell_activation = PlaceCellActivation(device)
-    test_head_cell_activation = HeadCellActivation(device)
-
-    test_place_cell_activation = test_place_cell_activation(test_target)
-    test_head_cell_activation = test_head_cell_activation(test_heading)
-
-    model = MLP(in_features = test_input.shape[-1], 
-                out_features = test_place_cell_activation.shape[-1] + test_head_cell_activation.shape[-1], 
+    model = MLP(in_features = 37, 
+                out_features = 256 + 12, 
                 num_cells = [256, 256], dropout=0.5)
-
     model = model.to(device)
     params = TensorDict.from_module(model)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-    loss_module = PlaceHeadPredictionLoss(device)
+    params.load_memmap(get_project_root_path_vscode() + "model_state_dropout")
+    #create test data.
+    max_per_dim = torch.tensor([2.3198, 0.3236, 0.8711, 1.3061, 1.8617, 2.7261, 3.5292, 4.7789])
+    min_per_dim = torch.tensor([-0.1643, -1.7658, -1.7496, -0.4820, -2.6647, -1.8809, -5.4557, -3.9380])
+    #lets have a look at gridding the first two dimensions and keeping the latter ones fixed.
+    mean_vector = torch.zeros(8,)
+    mean_vector[2:] = (max_per_dim[2:] + min_per_dim[2:]) / 2
+    #lets do 200 points
+    x = torch.linspace(min_per_dim[0], max_per_dim[0], 200)
+    y = torch.linspace(min_per_dim[1], max_per_dim[1], 200)
 
-    pretrain_gradient_steps = 100000
-    for step in range(pretrain_gradient_steps):
-        log_info = {}
-        dat = train_replay_buffer.sample(batch_size)
-        dat = dat.reshape((slice_count_in_batch, -1))
-        dat = dat.to(device)
+    grid = torch.meshgrid(x, y, indexing="ij")
+    zero_grid = torch.zeros_like(grid[0]).unsqueeze(-1).expand(-1, -1, 6)
+    
+    grid = torch.stack(grid, dim=-1)
+    grid = torch.cat((grid, zero_grid), dim=-1)
+    #now lets generate the vectors
+    vectors = grid + mean_vector
+    
+    #lets generate the activations
+    for i in range(200):
+        for j in range(200):
+            input = vectors[i, j].unsqueeze(-1).expand(-1, 3)
+            print('ok')
 
-        input, target = create_sample(dat, device)
-        input = input.to(device)
-        with params.to_module(model):
-            predict = model(input)
-        loss_dict = loss_module(predict, target)
-        head_loss = loss_dict["head_loss"]
-        place_loss = loss_dict["place_loss"]
-        loss = loss_dict["loss"]
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        log_info.update(
-            {
-                "loss": loss.item(),
-                "heading_loss": head_loss.item(),
-                "place_loss": place_loss.item(),
-            }
-        )
-        for key, value in log_info.items():
-                logger.log_scalar(key, value, step)
     print("Training complete, evaluating")
     # Evaluate model
     model.eval()
@@ -236,30 +205,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     eval_losses = []
     eval_head_losses = []
     eval_place_losses = []
-    for i in range(eval_steps):
-        dat = train_replay_buffer.sample(batch_size)
-        dat = dat.reshape((slice_count_in_batch, -1))
-        dat = dat.to(device)
-        input, target = create_sample(dat, device)
-        input = input.to(device)
-        with params.to_module(model):
-            predict = model(input)
-        loss_dict = loss_module(predict, target)
-        loss = loss_dict["loss"]
-        head_loss = loss_dict["head_loss"]
-        place_loss = loss_dict["place_loss"]
-        eval_losses.append(loss)
-        eval_head_losses.append(head_loss)
-        eval_place_losses.append(place_loss)
 
-    print("Evaluation loss: ", sum(eval_losses) / len(eval_losses))
-    print("Evaluation head loss: ", sum(eval_head_losses) / len(eval_head_losses))
-    print("Evaluation place loss: ", sum(eval_place_losses) / len(eval_place_losses))
-
-    logger.experiment.summary["eval_loss"] = (sum(eval_losses) / len(eval_losses)).item()
-    logger.experiment.summary["eval_head_loss"] = (sum(eval_head_losses) / len(eval_head_losses)).item()
-    logger.experiment.summary["eval_place_loss"] = (sum(eval_place_losses) / len(eval_losses)).item()
-    params.memmap("model_state")
     #start with working with just the first 100 time steps.
     #these seem to range from -10 to 10.
     print('ok')
