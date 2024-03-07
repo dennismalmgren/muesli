@@ -60,8 +60,6 @@ def main(cfg: "DictConfig"):  # noqa: F821
         batch_size=cfg.loss.mini_batch_size,
     )
 
-
-
     # Create loss and adv modules
     adv_module = GAE(
         gamma=cfg.loss.gamma,
