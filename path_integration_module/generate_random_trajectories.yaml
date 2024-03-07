@@ -1,0 +1,11 @@
+# task and env
+env:
+  env_name: Swimmer-v5
+  episode_max_len: 1000
+
+rb:
+  save_name: random_buffer_swimmer_v5
+
+collector:
+  num_envs: 10
+  num_episodes: 1000
