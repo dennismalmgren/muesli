@@ -51,32 +51,6 @@ def make_env(env_name="HalfCheetah-v4", device="cpu"):
 # Model utils
 # --------------------------------------------------------------------
 
-def create_path_integration_input(dat, device):
-    batch_dims = dat.shape[:-1]
-    t0_state = dat[..., :dat.shape[-1]//2] #t0
-    t1_state = dat[..., dat.shape[-1]//2:] #t1
-    u = t0_state / torch.linalg.vector_norm(t0_state, dim=-1).unsqueeze(-1)
-    v = t1_state / torch.linalg.vector_norm(t1_state, dim=-1).unsqueeze(-1)
-    I = torch.eye(u.shape[-1], device=device)
-    if len(batch_dims) > 0:
-        I = I.unsqueeze(0)
-    u_plus_v = u + v
-    u_plus_v = u_plus_v.unsqueeze(-1)
-    uv = torch.linalg.vecdot(u, v)
-    uv = uv.unsqueeze(-1).unsqueeze(-1)
-    u_extended = u.unsqueeze(-1)
-    v_extended = v.unsqueeze(-1)
-    uvtranspose = torch.transpose(u_plus_v, -2, -1)
-    vut = 2 * v_extended * torch.transpose(u_extended, -2, -1)
-    R = I - u_plus_v / (1 + uv) * uvtranspose + vut
-    indices = torch.triu_indices(R.shape[-2], R.shape[-1], offset=1)
-    R_input = R[..., indices[0], indices[1]] #Bx28
-    T_input = torch.linalg.vector_norm(t1_state - t0_state, dim=-1)
-    T_input = T_input.unsqueeze(-1)
-    # State + Vel + Rot
-    source = torch.cat((t0_state, T_input, R_input), dim=-1)
-
-    return source
 
 class ObservationModule(torch.nn.Module):
     def __init__(self):
@@ -99,9 +73,36 @@ class ObservationModule(torch.nn.Module):
                 layer_target.bias.data.copy_(layer_source.bias.clone().data)
         self.path_integration_model.requires_grad_(False)
 
+    def create_path_integration_input(self, dat, device):
+        batch_dims = dat.shape[:-1]
+        t0_state = dat[..., :dat.shape[-1]//2] #t0
+        t1_state = dat[..., dat.shape[-1]//2:] #t1
+        u = t0_state / torch.linalg.vector_norm(t0_state, dim=-1).unsqueeze(-1)
+        v = t1_state / torch.linalg.vector_norm(t1_state, dim=-1).unsqueeze(-1)
+        I = torch.eye(u.shape[-1], device=device)
+        if len(batch_dims) > 0:
+            I = I.unsqueeze(0)
+        u_plus_v = u + v
+        u_plus_v = u_plus_v.unsqueeze(-1)
+        uv = torch.linalg.vecdot(u, v)
+        uv = uv.unsqueeze(-1).unsqueeze(-1)
+        u_extended = u.unsqueeze(-1)
+        v_extended = v.unsqueeze(-1)
+        uvtranspose = torch.transpose(u_plus_v, -2, -1)
+        vut = 2 * v_extended * torch.transpose(u_extended, -2, -1)
+        R = I - u_plus_v / (1 + uv) * uvtranspose + vut
+        indices = torch.triu_indices(R.shape[-2], R.shape[-1], offset=1)
+        R_input = R[..., indices[0], indices[1]] #Bx28
+        T_input = torch.linalg.vector_norm(t1_state - t0_state, dim=-1)
+        T_input = T_input.unsqueeze(-1)
+        # State + Vel + Rot
+        source = torch.cat((t0_state, T_input, R_input), dim=-1)
+
+        return source
+
     def forward(self, observation):
         t1_state = observation[..., observation.shape[-1] //2:]
-        integration_input = create_path_integration_input(observation, device=observation.device)
+        integration_input = self.create_path_integration_input(observation, device=observation.device)
         integration_prediction = self.path_integration_model(integration_input) #256
         integration_prediction = torch.nan_to_num(integration_prediction, nan=0.0, posinf=0.0, neginf=0.0)
         #how to get the 256 items from the second-to-last layer?

@@ -16,7 +16,8 @@ from torchrl.envs import (
     TransformedEnv,
     VecNorm,
     ParallelEnv,
-    EnvCreator
+    EnvCreator,
+    CatFrames
 )
 from torchrl.envs.utils import RandomPolicy
 from torchrl.envs.libs.gym import GymEnv
@@ -27,6 +28,7 @@ import hydra
 def make_env(env_name="FrozenLake-v5", device="cpu"):
     env = GymEnv(env_name, device=device)
     env = TransformedEnv(env)
+    env.append_transform(CatFrames(2, in_keys=["observation"], dim=-1, padding="constant"))
     #env.append_transform(VecNorm(in_keys=["observation"], decay=0.99999, eps=1e-2))
     #env.append_transform(ClipTransform(in_keys=["observation"], low=-10, high=10))
     env.append_transform(RewardSum())
@@ -60,7 +62,6 @@ def generate_episodes(env_name,
         max_frames_per_traj=-1,
         total_frames=storage_size,
     )
-    environment_statistics = TensorDict({})
 
     print("Generating batches")
     gathered_rewards = []
