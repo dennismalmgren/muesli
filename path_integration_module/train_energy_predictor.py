@@ -1,6 +1,8 @@
 import time
 import sys
 from typing import Tuple
+import os
+import shutil
 
 import torch.optim
 import tqdm
@@ -39,7 +41,7 @@ class PlaceCellActivationCalculator:
     def __init__(self, place_cell_centers):
         self.place_cell_centers = place_cell_centers
         self.place_cell_centers = self.place_cell_centers.unsqueeze(0)
-        self.place_cell_scale = 3
+        self.place_cell_scale = 3 #todo: investigate impact
 
         self._place_cell_activation_dim = self.place_cell_centers.shape[1]
 
@@ -62,7 +64,7 @@ class HeadCellActivationCalculator:
         self.head_cell_centers = head_cell_centers
         self.head_cell_centers = self.head_cell_centers.unsqueeze(0)
 
-        self.head_cell_concentration = 15 
+        self.head_cell_concentration = 15  #todo: investigate impact
         self._head_cell_activation_dim = self.head_cell_centers.shape[1]
 
     @property
@@ -135,12 +137,14 @@ def main(cfg: "DictConfig"):  # noqa: F821
     cfg_trajectory_length = cfg.rb.trajectory_length
     cfg_slice_len = cfg.rb.slice_len #use first to predict the second
     cfg_batch_size = cfg.rb.batch_size
-    cfg_saved_rb_name = cfg.rb.saved_rb_name
-    cfg_num_place_cells = cfg.cell_placement.num_place_cells
-    cfg_num_head_cells = cfg.cell_placement.num_head_cells
-    cfg_cell_seed = cfg.cell_placement.seed
-    cfg_model_num_cells = cfg.model.num_cells
-    
+    cfg_saved_rb_base_path = cfg.rb.saved_base_path
+    cfg_saved_rb_name = cfg.rb.saved_dir
+    cfg_num_place_cells = cfg.energy_prediction.num_place_cells
+    cfg_num_head_cells = cfg.energy_prediction.num_head_cells
+    cfg_num_energy_heads = cfg.energy_prediction.num_energy_heads
+    cfg_cell_seed = cfg.energy_prediction.seed
+    cfg_model_num_cells = cfg.energy_prediction.num_cells
+    cfg_num_cat_frames = cfg.rb.num_cat_frames
     transition_count = cfg_trajectory_length * cfg_num_trajectories
     storage_size = transition_count
     train_sampler = SliceSampler(slice_len=cfg_slice_len)
@@ -151,15 +155,15 @@ def main(cfg: "DictConfig"):  # noqa: F821
     )
 
     project_root_path = get_project_root_path_vscode()
-    replay_buffer.loads(project_root_path + f"data/{cfg_saved_rb_name}")
+    replay_buffer.loads(project_root_path + f"{cfg_saved_rb_base_path}/{cfg_saved_rb_name}")
     
     # Create logger
     logger = None
     if cfg.logger.backend:
-        exp_name = generate_exp_name("PPO", f"{cfg.logger.exp_name}")
+        exp_name = generate_exp_name("EModel", f"{cfg.logger.exp_name}")
         logger = get_logger(
             cfg.logger.backend,
-            logger_name="ppo",
+            logger_name="energy_model",
             experiment_name=exp_name,
             wandb_kwargs={
                 "config": dict(cfg),
@@ -179,7 +183,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
                                           test_head_cell_activation_calculator)
     test_data = replay_buffer.sample(cfg_batch_size) 
     test_observation = test_data["observation"]
-    model = EnergyPredictor(test_observation.shape[-1]// 2, cfg_num_place_cells, cfg_num_head_cells, cfg_model_num_cells)
+    model = EnergyPredictor(test_observation.shape[-1], cfg_num_cat_frames, 
+                            cfg_num_place_cells, cfg_num_head_cells, cfg_num_energy_heads, cfg_model_num_cells)
     energy_prediction_module = TensorDictModule(
         model,
         in_keys=["observation"],
@@ -198,8 +203,9 @@ def main(cfg: "DictConfig"):  # noqa: F821
             collected_steps = step
         log_info = {}
         data = replay_buffer.sample(cfg_batch_size)
+
         data = data.to(device)
-        #with params.to_module(energy_prediction_module):
+
         predict = energy_prediction_module(data)
         loss_td = loss_module(predict)
         head_loss = loss_td["head_loss"]
@@ -207,7 +213,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
         loss = loss_td["loss"]
         optimizer.zero_grad()        
         loss.backward()
-        #torch.nn.utils.clip_grad_norm_(energy_prediction_module.parameters(), 0.5)
+
         optimizer.step()
         log_info.update(
             {
@@ -234,22 +240,39 @@ def main(cfg: "DictConfig"):  # noqa: F821
         loss = loss_dict["loss"]
         head_loss = loss_dict["head_loss"]
         place_loss = loss_dict["place_loss"]
-        eval_losses.append(loss)
-        eval_head_losses.append(head_loss)
-        eval_place_losses.append(place_loss)
+        eval_losses.append(loss.detach().cpu().item())
+        eval_head_losses.append(head_loss.detach().cpu().item())
+        eval_place_losses.append(place_loss.detach().cpu().item())
 
     print("Evaluation loss: ", sum(eval_losses) / len(eval_losses))
     print("Evaluation head loss: ", sum(eval_head_losses) / len(eval_head_losses))
     print("Evaluation place loss: ", sum(eval_place_losses) / len(eval_place_losses))
 
-    logger.experiment.summary["eval_loss"] = (sum(eval_losses) / len(eval_losses)).item()
-    logger.experiment.summary["eval_head_loss"] = (sum(eval_head_losses) / len(eval_head_losses)).item()
-    logger.experiment.summary["eval_place_loss"] = (sum(eval_place_losses) / len(eval_losses)).item()
+    logger.experiment.summary["eval_loss"] = (sum(eval_losses) / len(eval_losses))
+    logger.experiment.summary["eval_head_loss"] = (sum(eval_head_losses) / len(eval_head_losses))
+    logger.experiment.summary["eval_place_loss"] = (sum(eval_place_losses) / len(eval_losses))
+    metadata = TensorDict({})
+    metadata["place_cell_centers"] = place_cell_centers.cpu()
+    metadata["head_cell_centers"] = head_cell_centers.cpu()
+    metadata["place_cell_scale"] = torch.tensor(test_place_cell_activation_calculator.place_cell_scale)
+    metadata["head_cell_concentration"] = torch.tensor(test_head_cell_activation_calculator.head_cell_concentration)
+    metadata["num_place_cells"] = torch.tensor(cfg_num_place_cells)
+    metadata["num_head_cells"] = torch.tensor(cfg_num_head_cells)
+    metadata["num_energy_heads"] = torch.tensor(cfg_num_energy_heads)
+    metadata["num_cells"] = torch.tensor(cfg_model_num_cells)
+    metadata["num_cat_frames"] = torch.tensor(cfg_num_cat_frames)
+
     params = TensorDict.from_module(energy_prediction_module)
-    params.memmap("model_state")
+    model_dir = project_root_path + f"{cfg.artefacts.model_save_base_path}/{cfg.artefacts.model_save_dir}"
+    if os.path.exists(model_dir):
+        shutil.rmtree(model_dir)
+    os.mkdir(model_dir)
+    params.memmap(project_root_path + f"{cfg.artefacts.model_save_base_path}/{cfg.artefacts.model_save_dir}/model_params")
+    metadata.memmap(project_root_path + f"{cfg.artefacts.model_save_base_path}/{cfg.artefacts.model_save_dir}/model_metadata")
+
     #start with working with just the first 100 time steps.
     #these seem to range from -10 to 10.
-    print('ok')
+    print('Model saved')
 
 if __name__ == "__main__":
     main()

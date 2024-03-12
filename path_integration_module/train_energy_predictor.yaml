@@ -1,15 +1,18 @@
 # task and env
 env:
-  env_name: HalfCheetah-v4
+  #env_name: HalfCheetah-v4
+  env_name: Swimmer-v5
   episode_max_len: 1000
 
 rb:
   num_trajectories: 1000
   trajectory_length: 1000
-  slice_len: 2
-  batch_size: 2000 #slice len = 2, so 32 slices
-  saved_rb_name: random_buffer_halfcheetah_v4
-
+  slice_len: 1
+  batch_size: 2000
+  saved_dir: random_buffer_swimmer_v5
+  saved_base_path: data
+  num_cat_frames: 2
+  
 optim:
   pretrain_gradient_steps: 10_000
 
@@ -18,15 +21,18 @@ logger:
   backend: wandb
   project_name: state_prediction_task
   group_name: null
-  exp_name: Predict_Head_Place
+  exp_name: Predict_Place
   test_interval: 10_000
   num_test_episodes: 5
   mode: online
 
-cell_placement:
-  seed: 42
-  num_head_cells: 24
-  num_place_cells: 384
+artefacts:
+  model_save_base_path: models
+  model_save_dir: model_state_swimmer_v5_2
 
-model:
-  num_cells: 512
+energy_prediction:
+  seed: 42
+  num_head_cells: 12
+  num_place_cells: 256
+  num_energy_heads: 256
+  num_cells: 256

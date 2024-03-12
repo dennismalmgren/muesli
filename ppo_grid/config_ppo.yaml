@@ -1,6 +1,7 @@
 # task and env
 env:
-  env_name: HalfCheetah-v4
+#  env_name: HalfCheetah-v4
+  env_name: Swimmer-v5
 
 # collector
 collector:
@@ -10,9 +11,9 @@ collector:
 # logger
 logger:
   backend: wandb
-  project_name: PPO_Muesli_Comparison
-  group_name: PPO_Grid_HalfCheetah
-  exp_name: PPO_Grid_HalfCheetah
+  project_name: Grid_Comparison
+  group_name: PPO_Grid_Swimmer
+  exp_name: PPO_Grid_Swimmer
   test_interval: 10_000
   num_test_episodes: 5
   mode: online
@@ -35,3 +36,7 @@ loss:
   critic_coef: 0.25
   entropy_coef: 0.0
   loss_critic_type: l2
+
+energy_prediction:
+  model_save_base_path: models
+  model_save_dir: model_state_swimmer_v5_2

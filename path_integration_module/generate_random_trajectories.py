@@ -1,4 +1,5 @@
 import time
+import sys
 
 import torch.optim
 import tqdm
@@ -25,6 +26,13 @@ from torchrl.data.replay_buffers import LazyMemmapStorage, ReplayBuffer
 from tensordict import TensorDict
 import hydra
 
+def get_project_root_path_vscode():
+    trace_object = getattr(sys, 'gettrace', lambda: None)() #vscode debugging
+    if trace_object is not None:
+        return "../../../"
+    else:
+        return "../../../../"
+    
 def make_env(env_name="FrozenLake-v5", device="cpu"):
     env = GymEnv(env_name, device=device)
     env = TransformedEnv(env)
@@ -76,18 +84,19 @@ def generate_episodes(env_name,
 def main(cfg: "DictConfig"):
     # Get test rewards
     with torch.no_grad():
-            #actor.eval()
-            eval_start = time.time()
-            rewards, replay_buffer = generate_episodes(
-                cfg.env.env_name, 
-                num_envs=cfg.collector.num_envs,
-                num_episodes=cfg.collector.num_episodes,
-                max_trajectory_length = cfg.env.episode_max_len
-            )
-            eval_time = time.time() - eval_start
-            print(f"Generated episodes rewards: {rewards.mean().item():.2f} ± {rewards.std():.2f} (time: {eval_time:.2f}s)")
-            #actor.train()
-            replay_buffer.dumps(cfg.rb.save_name)
+        eval_start = time.time()
+        rewards, replay_buffer = generate_episodes(
+            cfg.env.env_name, 
+            num_envs=cfg.collector.num_envs,
+            num_episodes=cfg.collector.num_episodes,
+            max_trajectory_length = cfg.env.episode_max_len
+        )
+        eval_time = time.time() - eval_start
+        print(f"Generated episodes rewards: {rewards.mean().item():.2f} ± {rewards.std():.2f} (time: {eval_time:.2f}s)")
+    project_root_path = get_project_root_path_vscode()
+    rb_dir = project_root_path + f"{cfg.rb.save_base_path}/{cfg.rb.save_dir}"
+
+    replay_buffer.dumps(rb_dir)
 
 if __name__ == "__main__":
     main()  

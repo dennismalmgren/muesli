@@ -49,75 +49,49 @@ def make_env(env_name="HalfCheetah-v4", device="cpu"):
     return env
 
 
-# ====================================================================
-# Model utils
-# --------------------------------------------------------------------
-
-
-# class ObservationModule(torch.nn.Module):
-#     def __init__(self):
-#         super().__init__()
-#         stored_model = MLP(in_features = 8 + 1 + 28, 
-#                 out_features = 256 + 12, 
-#                 num_cells = [256, 256],
-#                 dropout=0.5)
-#         params = TensorDict.from_module(stored_model)
-#         params = params.load_memmap(get_project_root_path_vscode() + "model_state_dropout")
-#         params.to_module(stored_model)
-#         self.path_integration_model = MLP(in_features = 8 + 1 + 28,
-#                                 out_features = 256,
-#                                 num_cells = [256],
-#                                 activate_last_layer=True,
-#                                 dropout=0.5)
-#         for layer_source, layer_target in zip(stored_model, self.path_integration_model):
-#             if isinstance(layer_source, torch.nn.Linear):
-#                 layer_target.weight.data.copy_(layer_source.weight.clone().data)
-#                 layer_target.bias.data.copy_(layer_source.bias.clone().data)
-#         self.path_integration_model.requires_grad_(False)
-
-#     def create_path_integration_input(self, dat, device):
-#         batch_dims = dat.shape[:-1]
-#         t0_state = dat[..., :dat.shape[-1]//2] #t0
-#         t1_state = dat[..., dat.shape[-1]//2:] #t1
-#         u = t0_state / torch.linalg.vector_norm(t0_state, dim=-1).unsqueeze(-1)
-#         v = t1_state / torch.linalg.vector_norm(t1_state, dim=-1).unsqueeze(-1)
-#         I = torch.eye(u.shape[-1], device=device)
-#         if len(batch_dims) > 0:
-#             I = I.unsqueeze(0)
-#         u_plus_v = u + v
-#         u_plus_v = u_plus_v.unsqueeze(-1)
-#         uv = torch.linalg.vecdot(u, v)
-#         uv = uv.unsqueeze(-1).unsqueeze(-1)
-#         u_extended = u.unsqueeze(-1)
-#         v_extended = v.unsqueeze(-1)
-#         uvtranspose = torch.transpose(u_plus_v, -2, -1)
-#         vut = 2 * v_extended * torch.transpose(u_extended, -2, -1)
-#         R = I - u_plus_v / (1 + uv) * uvtranspose + vut
-#         indices = torch.triu_indices(R.shape[-2], R.shape[-1], offset=1)
-#         R_input = R[..., indices[0], indices[1]] #Bx28
-#         T_input = torch.linalg.vector_norm(t1_state - t0_state, dim=-1)
-#         T_input = T_input.unsqueeze(-1)
-#         # State + Vel + Rot
-#         source = torch.cat((t0_state, T_input, R_input), dim=-1)
-
-#         return source
-
-#     def forward(self, observation):
-#         t1_state = observation[..., observation.shape[-1] //2:]
-#         integration_input = self.create_path_integration_input(observation, device=observation.device)
-#         integration_prediction = self.path_integration_model(integration_input) #256
-#         integration_prediction = torch.nan_to_num(integration_prediction, nan=0.0, posinf=0.0, neginf=0.0)
-#         #how to get the 256 items from the second-to-last layer?
-#         policy_input = torch.cat((integration_prediction, t1_state), dim=-1) #+8
-#         return policy_input
-
 def transfer_weights(source, target):
     for ind, layer_target in enumerate(target):
         if isinstance(layer_target, torch.nn.Linear):
             layer_target.weight.data.copy_(source[str(ind), 'weight'].clone().data)
             layer_target.bias.data.copy_(source[str(ind), 'bias'].clone().data)
 
-def make_ppo_models_state(proof_environment):
+def make_energy_prediction_module(input_shape, cfg) -> EnergyPredictor:
+    model_save_base_path = cfg.energy_prediction.model_save_base_path
+    model_save_dir = cfg.energy_prediction.model_save_dir
+    metadata = TensorDict({}).load_memmap(get_project_root_path_vscode() + 
+                                        f"{model_save_base_path}/{model_save_dir}/model_metadata")
+    params = TensorDict({}).load_memmap(get_project_root_path_vscode() + 
+                                      f"{model_save_base_path}/{model_save_dir}/model_params")
+    cfg_num_place_cells = metadata["num_place_cells"].item()
+    cfg_num_head_cells = metadata["num_head_cells"].item()
+    cfg_num_energy_heads = metadata["num_energy_heads"].item()
+    cfg_model_num_cells = metadata["num_cells"].item()
+    cfg_num_cat_frames = metadata["num_cat_frames"].item()
+    
+
+    predictor_module = EnergyPredictor(in_features = input_shape[-1], 
+                                       num_cat_frames=cfg_num_cat_frames,
+                                       num_place_cells=cfg_num_place_cells, 
+                                       num_head_cells=cfg_num_head_cells, 
+                                       num_energy_heads=cfg_num_energy_heads,
+                                       num_cells=cfg_model_num_cells)
+    predictor_module.eval()
+    
+    energy_prediction_module = TensorDictModule(
+        predictor_module,
+        in_keys=["observation"],
+        out_keys=["integration_prediction", "place_energy_prediction", "head_energy_prediction"],
+    )
+    
+    transfer_weights(params['module', 'path_integration_model'], energy_prediction_module.path_integration_model)
+    transfer_weights(params['module', 'place_energy_output_model'], energy_prediction_module.place_energy_output_model)
+    transfer_weights(params['module', 'head_energy_output_model'], energy_prediction_module.head_energy_output_model)
+   
+    energy_prediction_module.requires_grad_(False)
+    energy_prediction_module.eval()
+    return energy_prediction_module
+
+def make_ppo_models_state(proof_environment, cfg):
 
     input_shape = proof_environment.observation_spec["observation"].shape
 
@@ -130,33 +104,12 @@ def make_ppo_models_state(proof_environment):
         "tanh_loc": False,
     }
 
-    num_energy_prediction_cells = 512
-    predictor_module = EnergyPredictor(in_features = input_shape[-1] // 2, num_place_cells=384, 
-                                       num_head_cells=24, 
-                                       num_cells=num_energy_prediction_cells)
-    #predictor_module.eval()
+    energy_prediction_module = make_energy_prediction_module(input_shape, cfg)
     
-    energy_prediction_module = TensorDictModule(
-        predictor_module,
-        in_keys=["observation"],
-        out_keys=["integration_prediction", "place_energy_prediction", "head_energy_prediction"],
-    )
-    
-    #energy_prediction_module = energy_prediction_module.to("cuda")
-
-    params = TensorDict.from_module(energy_prediction_module, as_module=True)
-    params = params.load_memmap(get_project_root_path_vscode() + "models/model_state_halfcheetahv4_384").to_tensordict()
-
-    transfer_weights(params['module', 'path_integration_model'], energy_prediction_module.path_integration_model)
-    transfer_weights(params['module', 'place_energy_output_model'], energy_prediction_module.place_energy_output_model)
-    transfer_weights(params['module', 'head_energy_output_model'], energy_prediction_module.head_energy_output_model)
-   
-    energy_prediction_module.requires_grad_(False)
-    energy_prediction_module.eval()
     #energy_prediction_module = energy_prediction_module.to("cuda")
     # Define policy architecture
     policy_mlp = MLP(
-        in_features=input_shape[-1] + 256,
+        in_features=input_shape[-1] + energy_prediction_module.path_integration_model.out_features,
         activation_class=torch.nn.Tanh,
         out_features=num_outputs,  
         num_cells=[64, 64],
@@ -217,9 +170,9 @@ def make_ppo_models_state(proof_environment):
     return policy_module, value_module, energy_prediction_module, mean_predict_module, scale_predict_module
 
 
-def make_ppo_models(env_name):
+def make_ppo_models(env_name, cfg):
     proof_environment = make_env(env_name, device="cpu")
-    actor, critic, energy_prediction_module, mean_predict_module, scale_predict_module = make_ppo_models_state(proof_environment)
+    actor, critic, energy_prediction_module, mean_predict_module, scale_predict_module = make_ppo_models_state(proof_environment, cfg)
     return actor, critic, energy_prediction_module, mean_predict_module, scale_predict_module
 
 

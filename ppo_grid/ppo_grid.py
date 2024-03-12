@@ -38,7 +38,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     )
 
     # Create models (check utils_mujoco.py)
-    actor, critic, energy_prediction_module, mean_predict_module, scale_predict_module = make_ppo_models(cfg.env.env_name)
+    actor, critic, energy_prediction_module, mean_predict_module, scale_predict_module = make_ppo_models(cfg.env.env_name, cfg)
     actor, critic = actor.to(device), critic.to(device)
 
     # Create collector

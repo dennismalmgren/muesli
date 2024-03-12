@@ -1,6 +1,6 @@
 # task and env
 env:
-  env_name: HalfCheetah-v4
+  env_name: Swimmer-v5
 
 # collector
 collector:
@@ -10,9 +10,9 @@ collector:
 # logger
 logger:
   backend: wandb
-  project_name: PPO_Muesli_Comparison
-  group_name: PPO_HalfCheetah_Baseline
-  exp_name: Mujoco_PPO
+  project_name: Grid_Comparison
+  group_name: PPO_Swimmer_Double
+  exp_name: PPO_Swimmer_Double
   test_interval: 10_000
   num_test_episodes: 5
   mode: online
