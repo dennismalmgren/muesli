@@ -31,7 +31,7 @@ from torchrl.modules import MLP
 from torch import nn
 from tensordict import TensorDictBase
 from tensordict.nn import TensorDictModule
-
+import tqdm
 from train_utils import get_project_root_path_vscode
 from energy_predictor_module import EnergyPredictor
 
@@ -142,7 +142,6 @@ def main(cfg: "DictConfig"):  # noqa: F821
     cfg_model_num_cells = cfg.model.num_cells
     
     transition_count = cfg_trajectory_length * cfg_num_trajectories
-    minibatch_size = cfg_batch_size // cfg_slice_len
     storage_size = transition_count
     train_sampler = SliceSampler(slice_len=cfg_slice_len)
     replay_buffer = TensorDictReplayBuffer(
@@ -187,22 +186,28 @@ def main(cfg: "DictConfig"):  # noqa: F821
         out_keys=["integration_prediction", "place_energy_prediction", "head_energy_prediction"],
     )
     energy_prediction_module = energy_prediction_module.to(device)
-    params = TensorDict.from_module(energy_prediction_module)
+    #params = TensorDict.from_module(energy_prediction_module)
     optimizer = torch.optim.AdamW(energy_prediction_module.parameters(), lr=1e-3) #maybe config?
-
-    pretrain_gradient_steps = 100_000 #maybe config
-    for step in range(pretrain_gradient_steps):
+    cfg_pretrain_gradient_steps = cfg.optim.pretrain_gradient_steps #maybe config
+    pbar = tqdm.tqdm(total=cfg_pretrain_gradient_steps)
+    collected_steps = 0
+    for step in range(cfg_pretrain_gradient_steps):
+        if (step % 100 == 0):
+            additional_steps = step - collected_steps
+            pbar.update(additional_steps)
+            collected_steps = step
         log_info = {}
         data = replay_buffer.sample(cfg_batch_size)
         data = data.to(device)
-        with params.to_module(energy_prediction_module):
-            predict = energy_prediction_module(data)
+        #with params.to_module(energy_prediction_module):
+        predict = energy_prediction_module(data)
         loss_td = loss_module(predict)
         head_loss = loss_td["head_loss"]
         place_loss = loss_td["place_loss"]
         loss = loss_td["loss"]
-        optimizer.zero_grad()
+        optimizer.zero_grad()        
         loss.backward()
+        #torch.nn.utils.clip_grad_norm_(energy_prediction_module.parameters(), 0.5)
         optimizer.step()
         log_info.update(
             {
@@ -223,8 +228,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
     for i in range(eval_steps):
         data = replay_buffer.sample(cfg_batch_size)
         data = data.to(device)
-        with params.to_module(energy_prediction_module):
-            predict = energy_prediction_module(data)
+        #with params.to_module(energy_prediction_module):
+        predict = energy_prediction_module(data)
         loss_dict = loss_module(predict)
         loss = loss_dict["loss"]
         head_loss = loss_dict["head_loss"]
@@ -240,6 +245,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     logger.experiment.summary["eval_loss"] = (sum(eval_losses) / len(eval_losses)).item()
     logger.experiment.summary["eval_head_loss"] = (sum(eval_head_losses) / len(eval_head_losses)).item()
     logger.experiment.summary["eval_place_loss"] = (sum(eval_place_losses) / len(eval_losses)).item()
+    params = TensorDict.from_module(energy_prediction_module)
     params.memmap("model_state")
     #start with working with just the first 100 time steps.
     #these seem to range from -10 to 10.

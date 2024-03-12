@@ -1,15 +1,17 @@
 # task and env
 env:
-  env_name: Swimmer-v5
+  env_name: HalfCheetah-v4
   episode_max_len: 1000
 
 rb:
-  save_name: random_buffer_swimmer_v5
   num_trajectories: 1000
   trajectory_length: 1000
   slice_len: 2
   batch_size: 2000 #slice len = 2, so 32 slices
-  saved_rb_name: random_buffer_swimmer_v5
+  saved_rb_name: random_buffer_halfcheetah_v4
+
+optim:
+  pretrain_gradient_steps: 10_000
 
 # logger
 logger:
@@ -23,8 +25,8 @@ logger:
 
 cell_placement:
   seed: 42
-  num_head_cells: 12
-  num_place_cells: 256
+  num_head_cells: 24
+  num_place_cells: 384
 
 model:
-  num_cells: 256
+  num_cells: 512

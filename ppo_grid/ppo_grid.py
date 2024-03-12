@@ -27,7 +27,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     from torchrl.objectives import ClipPPOLoss
     from torchrl.objectives.value.advantages import GAE
     from torchrl.record.loggers import generate_exp_name, get_logger
-    from utils_ppo import eval_model, make_env, make_ppo_models, create_path_integration_input
+    from utils_ppo import eval_model, make_env, make_ppo_models
 
     device = "cpu" if not torch.cuda.device_count() else "cuda"
     num_mini_batches = cfg.collector.frames_per_batch // cfg.loss.mini_batch_size
@@ -38,17 +38,16 @@ def main(cfg: "DictConfig"):  # noqa: F821
     )
 
     # Create models (check utils_mujoco.py)
-    actor, critic = make_ppo_models(cfg.env.env_name)
+    actor, critic, energy_prediction_module, mean_predict_module, scale_predict_module = make_ppo_models(cfg.env.env_name)
     actor, critic = actor.to(device), critic.to(device)
 
     # Create collector
     collector = SyncDataCollector(
-        create_env_fn=make_env(cfg.env.env_name, device),
+        create_env_fn=make_env(cfg.env.env_name, "cpu"),
         policy=actor,
         frames_per_batch=cfg.collector.frames_per_batch,
         total_frames=cfg.collector.total_frames,
-        device=device,
-        storing_device=device,
+        device="cpu",
         max_frames_per_traj=-1,
     )
 
@@ -59,8 +58,6 @@ def main(cfg: "DictConfig"):  # noqa: F821
         sampler=sampler,
         batch_size=cfg.loss.mini_batch_size,
     )
-
-
 
     # Create loss and adv modules
     adv_module = GAE(
@@ -123,7 +120,6 @@ def main(cfg: "DictConfig"):  # noqa: F821
     losses = TensorDict({}, batch_size=[cfg_loss_ppo_epochs, num_mini_batches])
 
     for i, data in enumerate(collector):
-
         log_info = {}
         sampling_time = time.time() - sampling_start
         frames_in_batch = data.numel()
@@ -143,6 +139,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
             )
 
         training_start = time.time()
+        data = data.to(device)
         for j in range(cfg_loss_ppo_epochs):
 
             # Compute GAE

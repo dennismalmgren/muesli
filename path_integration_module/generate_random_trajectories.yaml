@@ -1,10 +1,10 @@
 # task and env
 env:
-  env_name: Swimmer-v5
+  env_name: HalfCheetah-v4
   episode_max_len: 1000
 
 rb:
-  save_name: random_buffer_swimmer_v5
+  save_name: random_buffer_halfcheetah_v4
 
 collector:
   num_envs: 10

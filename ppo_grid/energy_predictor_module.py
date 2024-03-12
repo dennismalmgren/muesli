@@ -54,10 +54,7 @@ class EnergyPredictor(nn.Module):
         t1_state = observation[..., observation.shape[-1]//2:] #t1
         integration_input = self.create_path_integration_input(t0_state, t1_state)
         integration_input = torch.nan_to_num(integration_input, nan=0.0, posinf=0.0, neginf=0.0)
-        integration_prediction = self.path_integration_model(integration_input) #256
-        #integration_prediction = torch.nan_to_num(integration_prediction, nan=0.0, posinf=0.0, neginf=0.0)
+        integration_prediction = self.path_integration_model(integration_input)
         head_energy_prediction = self.head_energy_output_model(integration_prediction)
         place_energy_prediction = self.place_energy_output_model(integration_prediction)
         return integration_prediction, place_energy_prediction, head_energy_prediction
-#        policy_input = torch.cat((integration_prediction, t1_state), dim=-1) #+8
-#        return policy_input
