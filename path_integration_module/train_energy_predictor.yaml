@@ -19,12 +19,12 @@ optim:
 # logger
 logger:
   backend: wandb
-  project_name: state_prediction_task
+  project_name: state_prediction_task_berzelius
   group_name: null
   exp_name: Predict_Place
   test_interval: 10_000
   num_test_episodes: 5
-  mode: disabled
+  mode: online
 
 artefacts:
   model_save_base_path: models
