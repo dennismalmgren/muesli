@@ -5,9 +5,9 @@ env:
 
 rb:
   save_base_path: data
-  save_dir: random_buffer_swimmer_v5_2
+  save_dir: random_buffer_swimmer_v5
 
 collector:
   num_envs: 10
-  num_episodes: 1000
+  num_episodes: 100
 

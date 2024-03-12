@@ -14,7 +14,7 @@ rb:
   num_cat_frames: 2
   
 optim:
-  pretrain_gradient_steps: 10_000
+  pretrain_gradient_steps: 1_000
 
 # logger
 logger:
@@ -24,7 +24,7 @@ logger:
   exp_name: Predict_Place
   test_interval: 10_000
   num_test_episodes: 5
-  mode: online
+  mode: disabled
 
 artefacts:
   model_save_base_path: models

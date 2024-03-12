@@ -6,7 +6,7 @@ env:
 # collector
 collector:
   frames_per_batch: 2048
-  total_frames: 1_000_000
+  total_frames: 100_000
 
 # logger
 logger:
@@ -16,7 +16,7 @@ logger:
   exp_name: PPO_Grid_Swimmer
   test_interval: 10_000
   num_test_episodes: 5
-  mode: online
+  mode: disabled
 
 
 # Optim

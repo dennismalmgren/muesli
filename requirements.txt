@@ -1,0 +1,8 @@
+wandb
+tensordict-nightly
+torchrl-nightly
+gymnasium[mujoco]>=1.0.0a1.dev0
+hydra-core
+hydra-submitit-launcher
+matplotlib
+tqdm
