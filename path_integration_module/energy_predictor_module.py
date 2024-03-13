@@ -10,20 +10,20 @@ class EnergyPredictor(nn.Module):
                  num_energy_heads: int,
                  num_cells: int):
         super().__init__()
-        #is this even correctly handled?
-        #I'm confused..
+        self.predict_heading = num_head_cells > 0
+
          #first MLP should take in_features + 1 (vel) + n (n - 1) / 2 (rot)
         obs_dim = in_features // num_cat_frames
         self.path_integration_model = MLP(in_features = obs_dim + 1 + obs_dim * (obs_dim - 1) // 2,
                                 out_features = num_energy_heads, #should probably be another layer here.
                                 num_cells = [num_cells],
                                 activate_last_layer=True)
-
-        self.head_energy_output_model = MLP(in_features = num_energy_heads,
-                                out_features = num_head_cells,
-                                num_cells = [num_cells],
-                                activate_last_layer=False,
-                                dropout=0.5)
+        if self.predict_heading:
+            self.head_energy_output_model = MLP(in_features = num_energy_heads,
+                                    out_features = num_head_cells,
+                                    num_cells = [num_cells],
+                                    activate_last_layer=False,
+                                    dropout=0.5)
         
         self.place_energy_output_model = MLP(in_features = num_energy_heads,
                         out_features = num_place_cells,
@@ -61,7 +61,9 @@ class EnergyPredictor(nn.Module):
         integration_input = self.create_path_integration_input(t0_state, t1_state)
         integration_input = torch.nan_to_num(integration_input, nan=0.0, posinf=0.0, neginf=0.0)
         integration_prediction = self.path_integration_model(integration_input) #256
-
-        head_energy_prediction = self.head_energy_output_model(integration_prediction)
         place_energy_prediction = self.place_energy_output_model(integration_prediction)
-        return integration_prediction, place_energy_prediction, head_energy_prediction
+        if self.predict_heading:
+            head_energy_prediction = self.head_energy_output_model(integration_prediction)
+            return integration_prediction, place_energy_prediction, head_energy_prediction
+        else:
+            return integration_prediction, place_energy_prediction

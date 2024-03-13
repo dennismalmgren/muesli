@@ -24,7 +24,7 @@ logger:
   exp_name: Predict_Place
   test_interval: 10_000
   num_test_episodes: 5
-  mode: online
+  mode: disabled
 
 artefacts:
   model_save_base_path: models
@@ -32,7 +32,7 @@ artefacts:
 
 energy_prediction:
   seed: 42
-  num_head_cells: 12
+  num_head_cells: 0
   num_place_cells: 256
   num_energy_heads: 256
   num_cells: 256
