@@ -9,9 +9,12 @@ class EnergyPredictor(nn.Module):
                  num_head_cells: int, 
                  num_energy_heads: int,
                  num_cells: int,
-                 from_source: str):
+                 from_source: str,
+                 use_state_dropout: bool):
         super().__init__()
         self.predict_heading = num_head_cells > 0
+        self.predict_place = num_place_cells > 0
+        self.predict_state = not (self.predict_heading or self.predict_place)
         self.from_source = from_source
         #from_source == path_integration, current_state, delta
 
@@ -38,13 +41,22 @@ class EnergyPredictor(nn.Module):
                                     num_cells = [num_cells],
                                     activate_last_layer=False,
                                     dropout=0.5)
-        
-        self.place_energy_output_model = MLP(in_features = num_energy_heads,
-                        out_features = num_place_cells,
-                        num_cells = [num_cells],
-                        activate_last_layer=False,
-                        dropout=0.5)
-        
+        if self.predict_place:
+            self.place_energy_output_model = MLP(in_features = num_energy_heads,
+                            out_features = num_place_cells,
+                            num_cells = [num_cells],
+                            activate_last_layer=False,
+                            dropout=0.5)
+        if self.predict_state:
+            dropout = None
+            if use_state_dropout:
+                dropout = 0.5
+            self.state_energy_output_model = MLP(in_features = num_energy_heads,
+                            out_features = obs_dim,
+                            num_cells = [num_cells],
+                            activate_last_layer=False,
+                            dropout=dropout)
+                    
     def calculate_path_integration_input_dim(self, obs_dim):
         return obs_dim + 1 + obs_dim * (obs_dim - 1) // 2
     
@@ -101,10 +113,17 @@ class EnergyPredictor(nn.Module):
             integration_input = self.create_delta_state_input(t0_state, t1_state)
 
         integration_prediction = self.path_integration_model(integration_input) 
-        place_energy_prediction = self.place_energy_output_model(integration_prediction)
-        if self.predict_heading:
-            #not compatible with from_source current_state.
+        if self.predict_state:
+            state_energy_prediction = self.state_energy_output_model(integration_prediction)
+            return integration_prediction, state_energy_prediction
+        
+        if self.predict_place and not self.predict_heading:
+            place_energy_prediction = self.place_energy_output_model(integration_prediction)
+            return integration_prediction, state_energy_prediction
+
+        if self.predict_heading and not self.predict_place:
             head_energy_prediction = self.head_energy_output_model(integration_prediction)
-            return integration_prediction, place_energy_prediction, head_energy_prediction
-        else:
-            return integration_prediction, place_energy_prediction
+            return integration_prediction, head_energy_prediction
+        
+        #default:
+        return integration_prediction, place_energy_prediction, head_energy_prediction
