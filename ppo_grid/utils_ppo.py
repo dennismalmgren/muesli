@@ -68,13 +68,15 @@ def make_energy_prediction_module(input_shape, cfg) -> EnergyPredictor:
     cfg_model_num_cells = metadata["num_cells"].item()
     cfg_num_cat_frames = metadata["num_cat_frames"].item()
     cfg_predict_heading = cfg_num_head_cells > 0
-
+    cfg_from_source = metadata["from_source"]
     predictor_module = EnergyPredictor(in_features = input_shape[-1], 
                                        num_cat_frames=cfg_num_cat_frames,
                                        num_place_cells=cfg_num_place_cells, 
                                        num_head_cells=cfg_num_head_cells, 
                                        num_energy_heads=cfg_num_energy_heads,
-                                       num_cells=cfg_model_num_cells)
+                                       num_cells=cfg_model_num_cells,
+                                       from_source=cfg_from_source)
+    
     predictor_module.eval()
     out_keys = ["integration_prediction", "place_energy_prediction"]
     if cfg_predict_heading:
@@ -109,7 +111,6 @@ def make_ppo_models_state(proof_environment, cfg):
 
     energy_prediction_module = make_energy_prediction_module(input_shape, cfg)
     
-    #energy_prediction_module = energy_prediction_module.to("cuda")
     # Define policy architecture
     policy_mlp = MLP(
         in_features=input_shape[-1] + energy_prediction_module.path_integration_model.out_features,

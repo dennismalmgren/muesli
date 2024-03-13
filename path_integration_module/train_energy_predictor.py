@@ -171,6 +171,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     cfg_model_num_cells = cfg.energy_prediction.num_cells
     cfg_num_cat_frames = cfg.rb.num_cat_frames
     cfg_predict_heading = cfg.energy_prediction.num_head_cells > 0
+    cfg_from_source = cfg.energy_prediction.from_source
     transition_count = cfg_trajectory_length * cfg_num_trajectories
     storage_size = transition_count
     train_sampler = SliceSampler(slice_len=cfg_slice_len)
@@ -213,8 +214,13 @@ def main(cfg: "DictConfig"):  # noqa: F821
     
     test_data = replay_buffer.sample(cfg_batch_size) 
     test_observation = test_data["observation"]
-    model = EnergyPredictor(test_observation.shape[-1], cfg_num_cat_frames, 
-                            cfg_num_place_cells, cfg_num_head_cells, cfg_num_energy_heads, cfg_model_num_cells)
+    model = EnergyPredictor(test_observation.shape[-1], 
+                            cfg_num_cat_frames, 
+                            cfg_num_place_cells, 
+                            cfg_num_head_cells, 
+                            cfg_num_energy_heads,
+                            cfg_model_num_cells,
+                            cfg_from_source)
     out_keys = out_keys=["integration_prediction", "place_energy_prediction"]
     if cfg_predict_heading:
         out_keys.append("head_energy_prediction") 
@@ -304,7 +310,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     metadata["num_energy_heads"] = torch.tensor(cfg_num_energy_heads)
     metadata["num_cells"] = torch.tensor(cfg_model_num_cells)
     metadata["num_cat_frames"] = torch.tensor(cfg_num_cat_frames)
-
+    metadata["from_source"] = cfg_from_source
     params = TensorDict.from_module(energy_prediction_module)
     model_dir = project_root_path + f"{cfg.artefacts.model_save_base_path}/{cfg.artefacts.model_save_dir}"
     if os.path.exists(model_dir):

@@ -8,16 +8,26 @@ class EnergyPredictor(nn.Module):
                  num_place_cells: int, 
                  num_head_cells: int, 
                  num_energy_heads: int,
-                 num_cells: int):
+                 num_cells: int,
+                 from_source: str):
         super().__init__()
         self.predict_heading = num_head_cells > 0
+        self.from_source = from_source
+        #from_source == path_integration, current_state, delta
 
-         #first MLP should take in_features + 1 (vel) + n (n - 1) / 2 (rot)
+        #first MLP should take in_features + 1 (vel) + n (n - 1) / 2 (rot)
         obs_dim = in_features // num_cat_frames
-        self.path_integration_model = MLP(in_features = obs_dim + 1 + obs_dim * (obs_dim - 1) // 2,
+        if self.from_source == "path_integration":
+            input_dim = self.calculate_path_integration_input_dim(obs_dim)
+        elif self.from_source == "current_state":
+            input_dim = obs_dim
+
+        #this is more like the grid cell model, but too late to change.
+        self.path_integration_model = MLP(in_features = input_dim,
                                 out_features = num_energy_heads, #should probably be another layer here.
                                 num_cells = [num_cells],
                                 activate_last_layer=True)
+        
         if self.predict_heading:
             self.head_energy_output_model = MLP(in_features = num_energy_heads,
                                     out_features = num_head_cells,
@@ -30,7 +40,16 @@ class EnergyPredictor(nn.Module):
                         num_cells = [num_cells],
                         activate_last_layer=False,
                         dropout=0.5)
-
+        
+    def calculate_path_integration_input_dim(self, obs_dim):
+        return obs_dim + 1 + obs_dim * (obs_dim - 1) // 2
+    
+    def calculate_current_state_input_dim(self, obs_dim):
+        return obs_dim
+    
+    def create_path_integration_input(self, t0_state, t1_state):
+        return t1_state
+    
     def create_path_integration_input(self, t0_state, t1_state):
         u = t0_state / torch.linalg.vector_norm(t0_state, dim=-1).unsqueeze(-1)
         v = t1_state / torch.linalg.vector_norm(t1_state, dim=-1).unsqueeze(-1)
@@ -58,11 +77,16 @@ class EnergyPredictor(nn.Module):
     def forward(self, observation):
         t0_state = observation[..., :observation.shape[-1]//2] #t0
         t1_state = observation[..., observation.shape[-1]//2:] #t1
-        integration_input = self.create_path_integration_input(t0_state, t1_state)
-        integration_input = torch.nan_to_num(integration_input, nan=0.0, posinf=0.0, neginf=0.0)
-        integration_prediction = self.path_integration_model(integration_input) #256
+        if self.from_source == "path_integration":
+            integration_input = self.create_path_integration_input(t0_state, t1_state)
+            integration_input = torch.nan_to_num(integration_input, nan=0.0, posinf=0.0, neginf=0.0)
+        elif self.from_source == "current_state":
+            integration_input = t1_state
+
+        integration_prediction = self.path_integration_model(integration_input) 
         place_energy_prediction = self.place_energy_output_model(integration_prediction)
         if self.predict_heading:
+            #not compatible with from_source current_state.
             head_energy_prediction = self.head_energy_output_model(integration_prediction)
             return integration_prediction, place_energy_prediction, head_energy_prediction
         else:
