@@ -119,7 +119,7 @@ class PlaceHeadPredictionLoss(nn.Module):
             heading = self.calculate_heading(t0_state, t1_state)
             head_activations = self.head_cell_activation_calculator(heading)
             head_loss = self.ce_loss(tensordict[head_prediction_key], head_activations)
-            loss += head_loss
+            loss = head_loss + place_loss
 
         loss_td = TensorDict(
            {
