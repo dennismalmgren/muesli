@@ -21,6 +21,10 @@ class EnergyPredictor(nn.Module):
             input_dim = self.calculate_path_integration_input_dim(obs_dim)
         elif self.from_source == "current_state":
             input_dim = obs_dim
+        elif self.from_source == "old_state":
+            input_dim = obs_dim
+        elif self.from_source == "delta_state":
+            input_dim = 2*obs_dim
 
         #this is more like the grid cell model, but too late to change.
         self.path_integration_model = MLP(in_features = input_dim,
@@ -47,9 +51,18 @@ class EnergyPredictor(nn.Module):
     def calculate_current_state_input_dim(self, obs_dim):
         return obs_dim
     
-    def create_path_integration_input(self, t0_state, t1_state):
+    def calculate_old_state_input_dim(self, obs_dim):
+        return obs_dim
+    
+    def create_current_state_input(self, t0_state, t1_state):
         return t1_state
     
+    def create_old_state_input(self, t0_state, t1_state):
+        return t0_state
+    
+    def create_delta_state_input(self, t0_state, t1_state):
+        return torch.cat((t0_state, (t1_state - t0_state)), dim=-1)
+
     def create_path_integration_input(self, t0_state, t1_state):
         u = t0_state / torch.linalg.vector_norm(t0_state, dim=-1).unsqueeze(-1)
         v = t1_state / torch.linalg.vector_norm(t1_state, dim=-1).unsqueeze(-1)
@@ -81,7 +94,11 @@ class EnergyPredictor(nn.Module):
             integration_input = self.create_path_integration_input(t0_state, t1_state)
             integration_input = torch.nan_to_num(integration_input, nan=0.0, posinf=0.0, neginf=0.0)
         elif self.from_source == "current_state":
-            integration_input = t1_state
+            integration_input = self.create_current_state_input(t0_state, t1_state)
+        elif self.from_source == "old_state":
+            integration_input = self.create_old_state_input(t0_state, t1_state)
+        elif self.from_source == "delta_state":
+            integration_input = self.create_delta_state_input(t0_state, t1_state)
 
         integration_prediction = self.path_integration_model(integration_input) 
         place_energy_prediction = self.place_energy_output_model(integration_prediction)
