@@ -194,6 +194,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     cfg_predict_state = not (cfg_predict_heading or cfg_predict_place)
     cfg_from_source = cfg.energy_prediction.from_source
     cfg_use_state_dropout = cfg.energy_prediction.use_state_dropout
+    cfg_include_action = cfg.energy_prediction.include_action
     transition_count = cfg_trajectory_length * cfg_num_trajectories
     storage_size = transition_count
     train_sampler = SliceSampler(slice_len=cfg_slice_len)
@@ -245,7 +246,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
                             cfg_num_energy_heads,
                             cfg_model_num_cells,
                             cfg_from_source,
-                            cfg_use_state_dropout)
+                            cfg_use_state_dropout,
+                            cfg_include_action)
     out_keys =["integration_prediction"]
     if cfg_predict_heading:
         out_keys.append("head_energy_prediction") 

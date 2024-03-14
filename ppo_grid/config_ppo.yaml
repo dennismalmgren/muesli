@@ -39,4 +39,4 @@ loss:
 
 energy_prediction:
   model_save_base_path: models
-  model_save_dir: model_previous_place_swimmer_v5
+  model_save_dir: model_state_state_swimmer_v5

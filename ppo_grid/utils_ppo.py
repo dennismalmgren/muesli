@@ -69,13 +69,16 @@ def make_energy_prediction_module(input_shape, cfg) -> EnergyPredictor:
     cfg_num_cat_frames = metadata["num_cat_frames"].item()
     cfg_predict_heading = cfg_num_head_cells > 0
     cfg_from_source = metadata["from_source"]
+    cfg_use_state_dropout = metadata["cfg_use_state_dropout"].item()
+
     predictor_module = EnergyPredictor(in_features = input_shape[-1], 
                                        num_cat_frames=cfg_num_cat_frames,
                                        num_place_cells=cfg_num_place_cells, 
                                        num_head_cells=cfg_num_head_cells, 
                                        num_energy_heads=cfg_num_energy_heads,
                                        num_cells=cfg_model_num_cells,
-                                       from_source=cfg_from_source)
+                                       from_source=cfg_from_source,
+                                       use_state_dropout = cfg_use_state_dropout)
     
     predictor_module.eval()
     out_keys = ["integration_prediction", "place_energy_prediction"]
