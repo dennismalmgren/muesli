@@ -12,10 +12,12 @@ from torchrl.objectives.value.advantages import GAE
 from torchrl.envs import (
     DoubleToFloat,
     ExplorationType,
+    RenameTransform,
     RewardSum,
     StepCounter,
     TransformedEnv,
     VecNorm,
+    TensorDictPrimer,
     ParallelEnv,
     EnvCreator,
     CatFrames
@@ -23,8 +25,9 @@ from torchrl.envs import (
 from torchrl.envs.utils import RandomPolicy
 from torchrl.envs.libs.gym import GymEnv
 from torchrl.data.replay_buffers import LazyMemmapStorage, ReplayBuffer
-from tensordict import TensorDict
+from tensordict import TensorDict, TensorDictBase, NestedKey
 import hydra
+from torchrl.data import TensorSpec, CompositeSpec
 
 def get_project_root_path_vscode():
     trace_object = getattr(sys, 'gettrace', lambda: None)() #vscode debugging
@@ -39,15 +42,48 @@ def make_env(env_name="FrozenLake-v5", device="cpu"):
     env.append_transform(CatFrames(2, in_keys=["observation"], dim=-1, padding="constant"))
     #env.append_transform(VecNorm(in_keys=["observation"], decay=0.99999, eps=1e-2))
     #env.append_transform(ClipTransform(in_keys=["observation"], low=-10, high=10))
+
     env.append_transform(RewardSum())
     env.append_transform(StepCounter())
     env.append_transform(DoubleToFloat(in_keys=["observation"]))
+    action_spec = env.action_spec
+    env.append_transform(TensorDictPrimer(prev_action=action_spec, default_value=0.0))
+
     return env
 
 def make_vec_env(env_name, num_envs, device="cpu"):
     env = ParallelEnv(num_workers=num_envs, create_env_fn=EnvCreator(lambda: make_env(env_name, device)))
     return env
 
+class MyRandomPolicy:
+    """A random policy for data collectors.
+
+    This is a wrapper around the action_spec.rand method.
+
+    Args:
+        action_spec: TensorSpec object describing the action specs
+
+    Examples:
+        >>> from tensordict import TensorDict
+        >>> from torchrl.data.tensor_specs import BoundedTensorSpec
+        >>> action_spec = BoundedTensorSpec(-torch.ones(3), torch.ones(3))
+        >>> actor = RandomPolicy(action_spec=action_spec)
+        >>> td = actor(TensorDict({}, batch_size=[])) # selects a random action in the cube [-1; 1]
+    """
+
+    def __init__(self, action_spec: TensorSpec, action_key: NestedKey = "action"):
+        super().__init__()
+        self.action_spec = action_spec.clone()
+        self.action_key = action_key
+
+    def __call__(self, td: TensorDictBase) -> TensorDictBase:
+        if isinstance(self.action_spec, CompositeSpec):
+            return td.update(self.action_spec.rand())
+        else:
+            action = self.action_spec.rand()
+            td.set(("next", "prev_action"), action)
+            return td.set(self.action_key, action)
+        
 def generate_episodes(env_name, 
                       num_envs = 10,
                       num_episodes = 100,
@@ -62,7 +98,7 @@ def generate_episodes(env_name,
         sampler=sampler
     )
     env = make_vec_env(env_name, num_envs)
-    actor = RandomPolicy(env.action_spec)
+    actor = MyRandomPolicy(env.action_spec)
     collector = SyncDataCollector(
         env,
         policy=actor,

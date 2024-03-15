@@ -67,25 +67,33 @@ def make_energy_prediction_module(input_shape, cfg) -> EnergyPredictor:
     cfg_num_energy_heads = metadata["num_energy_heads"].item()
     cfg_model_num_cells = metadata["num_cells"].item()
     cfg_num_cat_frames = metadata["num_cat_frames"].item()
-    
+    cfg_predict_heading = cfg_num_head_cells > 0
+    cfg_from_source = metadata["from_source"]
+    cfg_use_state_dropout = metadata["cfg_use_state_dropout"].item()
 
     predictor_module = EnergyPredictor(in_features = input_shape[-1], 
                                        num_cat_frames=cfg_num_cat_frames,
                                        num_place_cells=cfg_num_place_cells, 
                                        num_head_cells=cfg_num_head_cells, 
                                        num_energy_heads=cfg_num_energy_heads,
-                                       num_cells=cfg_model_num_cells)
-    predictor_module.eval()
+                                       num_cells=cfg_model_num_cells,
+                                       from_source=cfg_from_source,
+                                       use_state_dropout = cfg_use_state_dropout)
     
+    predictor_module.eval()
+    out_keys = ["integration_prediction", "place_energy_prediction"]
+    if cfg_predict_heading:
+        out_keys.append("head_energy_prediction")
     energy_prediction_module = TensorDictModule(
         predictor_module,
         in_keys=["observation"],
-        out_keys=["integration_prediction", "place_energy_prediction", "head_energy_prediction"],
+        out_keys=out_keys,
     )
     
     transfer_weights(params['module', 'path_integration_model'], energy_prediction_module.path_integration_model)
     transfer_weights(params['module', 'place_energy_output_model'], energy_prediction_module.place_energy_output_model)
-    transfer_weights(params['module', 'head_energy_output_model'], energy_prediction_module.head_energy_output_model)
+    if cfg_predict_heading:
+        transfer_weights(params['module', 'head_energy_output_model'], energy_prediction_module.head_energy_output_model)
    
     energy_prediction_module.requires_grad_(False)
     energy_prediction_module.eval()
@@ -106,7 +114,6 @@ def make_ppo_models_state(proof_environment, cfg):
 
     energy_prediction_module = make_energy_prediction_module(input_shape, cfg)
     
-    #energy_prediction_module = energy_prediction_module.to("cuda")
     # Define policy architecture
     policy_mlp = MLP(
         in_features=input_shape[-1] + energy_prediction_module.path_integration_model.out_features,
