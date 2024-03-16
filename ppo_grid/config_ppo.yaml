@@ -16,7 +16,7 @@ logger:
   exp_name: PPO_Grid_Swimmer
   test_interval: 10_000
   num_test_episodes: 5
-  mode: online
+  mode: disabled
 
 
 # Optim
@@ -39,4 +39,4 @@ loss:
 
 energy_prediction:
   model_save_base_path: models
-  model_save_dir: model_state_state_swimmer_v5
+  model_save_dir: model_state_swimmer_v5

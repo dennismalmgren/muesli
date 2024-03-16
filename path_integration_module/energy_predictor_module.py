@@ -12,7 +12,7 @@ class EnergyPredictor(nn.Module):
                  num_energy_heads: int,
                  num_cells: int,
                  from_source: str,
-                 use_state_dropout: bool,
+                 use_dropout: bool,
                  include_action: bool):
         super().__init__()
         self.predict_heading = num_head_cells > 0
@@ -33,7 +33,9 @@ class EnergyPredictor(nn.Module):
             input_dim = self.obs_dim
         elif self.from_source == "delta_state":
             input_dim = 2*self.obs_dim
-
+        dropout = None
+        if use_dropout:
+            dropout = 0.5
         #this is more like the grid cell model, but too late to change.
         self.path_integration_model = MLP(in_features = input_dim,
                                 out_features = num_energy_heads, #should probably be another layer here.
@@ -45,18 +47,15 @@ class EnergyPredictor(nn.Module):
                                     out_features = num_head_cells,
                                     num_cells = [num_cells],
                                     activate_last_layer=False,
-                                    dropout=0.5)
+                                    dropout=dropout)
         if self.predict_place:
             self.place_energy_output_model = MLP(in_features = num_energy_heads,
                             out_features = num_place_cells,
                             num_cells = [num_cells],
                             activate_last_layer=False,
-                            dropout=0.5)
+                            dropout=dropout)
         if self.predict_state:
-            dropout = None
-            if use_state_dropout:
-                dropout = 0.5
-            self.state_energy_output_model = MLP(in_features = num_energy_heads,
+            self.state_output_model = MLP(in_features = num_energy_heads,
                             out_features = self.obs_dim,
                             num_cells = [num_cells],
                             activate_last_layer=False,
@@ -130,12 +129,12 @@ class EnergyPredictor(nn.Module):
 
         integration_prediction = self.path_integration_model(integration_input) 
         if self.predict_state:
-            state_energy_prediction = self.state_energy_output_model(integration_prediction)
-            return integration_prediction, state_energy_prediction
+            state_prediction = self.state_output_model(integration_prediction)
+            return integration_prediction, state_prediction
         
         if self.predict_place and not self.predict_heading:
             place_energy_prediction = self.place_energy_output_model(integration_prediction)
-            return integration_prediction, state_energy_prediction
+            return integration_prediction, place_energy_prediction
 
         if self.predict_heading and not self.predict_place:
             head_energy_prediction = self.head_energy_output_model(integration_prediction)

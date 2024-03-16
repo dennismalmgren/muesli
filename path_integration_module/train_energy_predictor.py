@@ -193,7 +193,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     cfg_predict_place = cfg.energy_prediction.num_place_cells > 0
     cfg_predict_state = not (cfg_predict_heading or cfg_predict_place)
     cfg_from_source = cfg.energy_prediction.from_source
-    cfg_use_state_dropout = cfg.energy_prediction.use_state_dropout
+    cfg_use_dropout = cfg.energy_prediction.use_dropout
     cfg_include_action = cfg.energy_prediction.include_action
     transition_count = cfg_trajectory_length * cfg_num_trajectories
     storage_size = transition_count
@@ -239,14 +239,16 @@ def main(cfg: "DictConfig"):  # noqa: F821
     
     test_data = replay_buffer.sample(cfg_batch_size) 
     test_observation = test_data["observation"]
+    test_prev_action = test_data["prev_action"]
     model = EnergyPredictor(test_observation.shape[-1], 
+                            test_prev_action.shape[-1],
                             cfg_num_cat_frames, 
                             cfg_num_place_cells, 
                             cfg_num_head_cells, 
                             cfg_num_energy_heads,
                             cfg_model_num_cells,
                             cfg_from_source,
-                            cfg_use_state_dropout,
+                            cfg_use_dropout,
                             cfg_include_action)
     out_keys =["integration_prediction"]
     if cfg_predict_heading:
@@ -361,7 +363,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
     metadata["num_cells"] = torch.tensor(cfg_model_num_cells)
     metadata["num_cat_frames"] = torch.tensor(cfg_num_cat_frames)
     metadata["from_source"] = cfg_from_source
-    metadata["cfg_use_state_dropout"] = torch.tensor(cfg_use_state_dropout)
+    metadata["use_dropout"] = torch.tensor(cfg_use_dropout)
+    metadata["include_action"] = torch.tensor(cfg_include_action)
     params = TensorDict.from_module(energy_prediction_module)
     model_dir = project_root_path + f"{cfg.artefacts.model_save_base_path}/{cfg.artefacts.model_save_dir}"
     if os.path.exists(model_dir):

@@ -3,32 +3,39 @@ from torch import nn
 from torchrl.modules import MLP
 
 class EnergyPredictor(nn.Module):
-    def __init__(self, in_features: int,
+    def __init__(self, 
+                 in_features_obs: int,
+                 in_features_act: int,
                  num_cat_frames: int,
                  num_place_cells: int, 
                  num_head_cells: int, 
                  num_energy_heads: int,
                  num_cells: int,
                  from_source: str,
-                 use_state_dropout: bool):
+                 use_dropout: bool,
+                 include_action: bool):
         super().__init__()
         self.predict_heading = num_head_cells > 0
         self.predict_place = num_place_cells > 0
         self.predict_state = not (self.predict_heading or self.predict_place)
         self.from_source = from_source
+        self.include_action = include_action
         #from_source == path_integration, current_state, delta
 
         #first MLP should take in_features + 1 (vel) + n (n - 1) / 2 (rot)
-        obs_dim = in_features // num_cat_frames
+        self.obs_dim = in_features_obs // num_cat_frames
+        self.act_dim = in_features_act
         if self.from_source == "path_integration":
-            input_dim = self.calculate_path_integration_input_dim(obs_dim)
+            input_dim = self.calculate_path_integration_input_dim()
         elif self.from_source == "current_state":
-            input_dim = obs_dim
+            input_dim = self.obs_dim
         elif self.from_source == "old_state":
-            input_dim = obs_dim
+            input_dim = self.obs_dim
         elif self.from_source == "delta_state":
-            input_dim = 2*obs_dim
-
+            input_dim = 2*self.obs_dim
+        dropout = None
+        if use_dropout:
+            dropout = 0.5
         #this is more like the grid cell model, but too late to change.
         self.path_integration_model = MLP(in_features = input_dim,
                                 out_features = num_energy_heads, #should probably be another layer here.
@@ -40,32 +47,38 @@ class EnergyPredictor(nn.Module):
                                     out_features = num_head_cells,
                                     num_cells = [num_cells],
                                     activate_last_layer=False,
-                                    dropout=0.5)
+                                    dropout=dropout)
         if self.predict_place:
             self.place_energy_output_model = MLP(in_features = num_energy_heads,
                             out_features = num_place_cells,
                             num_cells = [num_cells],
                             activate_last_layer=False,
-                            dropout=0.5)
+                            dropout=dropout)
         if self.predict_state:
-            dropout = None
-            if use_state_dropout:
-                dropout = 0.5
-            self.state_energy_output_model = MLP(in_features = num_energy_heads,
-                            out_features = obs_dim,
+            self.state_output_model = MLP(in_features = num_energy_heads,
+                            out_features = self.obs_dim,
                             num_cells = [num_cells],
                             activate_last_layer=False,
                             dropout=dropout)
                     
-    def calculate_path_integration_input_dim(self, obs_dim):
-        return obs_dim + 1 + obs_dim * (obs_dim - 1) // 2
-    
-    def calculate_current_state_input_dim(self, obs_dim):
-        return obs_dim
-    
+    def calculate_path_integration_input_dim(self):
+        if not self.include_action:
+            return self.obs_dim + 1 + self.obs_dim * (self.obs_dim - 1) // 2
+        else:
+            return self.obs_dim + 1 + self.obs_dim * (self.obs_dim - 1) // 2 + self.act_dim
+        
+    def calculate_current_state_input_dim(self):
+        if not self.include_action:            
+            return self.obs_dim
+        else:
+            return self.obs_dim + self.act_dim
+        
     def calculate_old_state_input_dim(self, obs_dim):
-        return obs_dim
-    
+        if not self.include_action:
+            return obs_dim
+        else:
+            return obs_dim + self.act_dim
+        
     def create_current_state_input(self, t0_state, t1_state):
         return t1_state
     
@@ -99,7 +112,7 @@ class EnergyPredictor(nn.Module):
         source = torch.cat((t0_state, T_input, R_input), dim=-1)
         return source
 
-    def forward(self, observation):
+    def forward(self, observation, prev_action):
         t0_state = observation[..., :observation.shape[-1]//2] #t0
         t1_state = observation[..., observation.shape[-1]//2:] #t1
         if self.from_source == "path_integration":
@@ -111,15 +124,17 @@ class EnergyPredictor(nn.Module):
             integration_input = self.create_old_state_input(t0_state, t1_state)
         elif self.from_source == "delta_state":
             integration_input = self.create_delta_state_input(t0_state, t1_state)
+        if self.include_action:
+            integration_input = torch.cat((integration_input, prev_action), dim=-1)
 
         integration_prediction = self.path_integration_model(integration_input) 
         if self.predict_state:
-            state_energy_prediction = self.state_energy_output_model(integration_prediction)
-            return integration_prediction, state_energy_prediction
+            state_prediction = self.state_output_model(integration_prediction)
+            return integration_prediction, state_prediction
         
         if self.predict_place and not self.predict_heading:
             place_energy_prediction = self.place_energy_output_model(integration_prediction)
-            return integration_prediction, state_energy_prediction
+            return integration_prediction, place_energy_prediction
 
         if self.predict_heading and not self.predict_place:
             head_energy_prediction = self.head_energy_output_model(integration_prediction)

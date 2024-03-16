@@ -28,14 +28,14 @@ logger:
 
 artefacts:
   model_save_base_path: models
-  model_save_dir: model_state_state_swimmer_v5
+  model_save_dir: model_state_swimmer_v5
 
 energy_prediction:
   seed: 42
   num_head_cells: 0
   num_place_cells: 0
-  use_state_dropout: False
-  include_action: True
+  use_dropout: False
+  include_action: False
   num_energy_heads: 256
   num_cells: 256
   from_source: "current_state" #path_integration, current_state, delta

@@ -42,13 +42,15 @@ def make_env(env_name="FrozenLake-v5", device="cpu"):
     env.append_transform(CatFrames(2, in_keys=["observation"], dim=-1, padding="constant"))
     #env.append_transform(VecNorm(in_keys=["observation"], decay=0.99999, eps=1e-2))
     #env.append_transform(ClipTransform(in_keys=["observation"], low=-10, high=10))
-
+    # env.append_transform(RenameTransform(in_keys=["action"], out_keys=["prev_action"], 
+    #                                      in_keys_inv=["action"], out_keys_inv=["prev_action"],
+    #                                      create_copy=True))
+    #env.append_transform(CopyKeysTransform(in_keys_inv=["action"], out_keys_inv=[("next", "prev_action")], create_copy=True))
     env.append_transform(RewardSum())
     env.append_transform(StepCounter())
     env.append_transform(DoubleToFloat(in_keys=["observation"]))
     action_spec = env.action_spec
     env.append_transform(TensorDictPrimer(prev_action=action_spec, default_value=0.0))
-
     return env
 
 def make_vec_env(env_name, num_envs, device="cpu"):
@@ -98,7 +100,7 @@ def generate_episodes(env_name,
         sampler=sampler
     )
     env = make_vec_env(env_name, num_envs)
-    actor = MyRandomPolicy(env.action_spec)
+    actor = RandomPolicy(env.action_spec)
     collector = SyncDataCollector(
         env,
         policy=actor,
@@ -110,6 +112,8 @@ def generate_episodes(env_name,
     print("Generating batches")
     gathered_rewards = []
     for i, data in enumerate(collector):
+        #hack
+        del data[('next', 'prev_action')] 
         replay_buffer.extend(data)
         print('Generated batch ', (i * num_envs))
         rewards = data["next", "episode_reward"][data["next", "done"]]

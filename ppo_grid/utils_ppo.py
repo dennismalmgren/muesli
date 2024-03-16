@@ -18,13 +18,15 @@ from torchrl.envs import (
     StepCounter,
     TransformedEnv,
     VecNorm,
-    CatFrames
+    CatFrames,
+    TensorDictPrimer
 )
 from torchrl.envs.libs.gym import GymEnv
 from torchrl.modules import MLP, ProbabilisticActor, TanhNormal, ValueOperator
 from torchrl.data.replay_buffers.samplers import SamplerWithoutReplacement, SliceSampler, RandomSampler
 from torchrl.data import LazyMemmapStorage, TensorDictReplayBuffer
 from tensordict import TensorDict
+from torch import nn
 from energy_predictor_module import EnergyPredictor
 
 # ====================================================================
@@ -46,6 +48,8 @@ def make_env(env_name="HalfCheetah-v4", device="cpu"):
     env.append_transform(RewardSum())
     env.append_transform(StepCounter())
     env.append_transform(DoubleToFloat(in_keys=["observation"]))
+    action_spec = env.action_spec
+    env.append_transform(TensorDictPrimer(prev_action=action_spec, default_value=0.0))
     return env
 
 
@@ -68,8 +72,11 @@ def make_energy_prediction_module(input_shape, cfg) -> EnergyPredictor:
     cfg_model_num_cells = metadata["num_cells"].item()
     cfg_num_cat_frames = metadata["num_cat_frames"].item()
     cfg_predict_heading = cfg_num_head_cells > 0
+    cfg_predict_place = cfg_num_place_cells > 0
+    cfg_predict_state = not (cfg_predict_heading or cfg_predict_place)
     cfg_from_source = metadata["from_source"]
-    cfg_use_state_dropout = metadata["cfg_use_state_dropout"].item()
+    cfg_use_dropout = metadata["use_dropout"].item()
+    cfg_include_action = metadata["include_action"].item()
 
     predictor_module = EnergyPredictor(in_features = input_shape[-1], 
                                        num_cat_frames=cfg_num_cat_frames,
@@ -78,12 +85,18 @@ def make_energy_prediction_module(input_shape, cfg) -> EnergyPredictor:
                                        num_energy_heads=cfg_num_energy_heads,
                                        num_cells=cfg_model_num_cells,
                                        from_source=cfg_from_source,
-                                       use_state_dropout = cfg_use_state_dropout)
+                                       use_state_dropout = cfg_use_dropout,
+                                       include_action = cfg_include_action)
     
     predictor_module.eval()
-    out_keys = ["integration_prediction", "place_energy_prediction"]
+    out_keys = ["integration_prediction"]
     if cfg_predict_heading:
         out_keys.append("head_energy_prediction")
+    if cfg_predict_place:
+        out_keys.append("place_energy_prediction")
+    if cfg_predict_state:
+        out_keys.append("state_prediction")
+
     energy_prediction_module = TensorDictModule(
         predictor_module,
         in_keys=["observation"],
@@ -91,14 +104,23 @@ def make_energy_prediction_module(input_shape, cfg) -> EnergyPredictor:
     )
     
     transfer_weights(params['module', 'path_integration_model'], energy_prediction_module.path_integration_model)
-    transfer_weights(params['module', 'place_energy_output_model'], energy_prediction_module.place_energy_output_model)
+    if cfg_predict_place:
+        transfer_weights(params['module', 'place_energy_output_model'], energy_prediction_module.place_energy_output_model)
     if cfg_predict_heading:
         transfer_weights(params['module', 'head_energy_output_model'], energy_prediction_module.head_energy_output_model)
-   
+    if cfg_predict_state:
+        transfer_weights(params['module', 'state_output_model'], energy_prediction_module.state_output_model)
     energy_prediction_module.requires_grad_(False)
     energy_prediction_module.eval()
     return energy_prediction_module
 
+class CopyModule(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return x
+    
 def make_ppo_models_state(proof_environment, cfg):
 
     input_shape = proof_environment.observation_spec["observation"].shape
@@ -154,6 +176,13 @@ def make_ppo_models_state(proof_environment, cfg):
         default_interaction_type=ExplorationType.RANDOM,
     )
 
+    copyModule = CopyModule()
+    copyModule = TensorDictModule(
+        copyModule,
+        in_keys=["action"],
+        out_keys=[("next", "prev_action")],
+    )
+    policy_module = TensorDictSequential(policy_module, copyModule)
     # Define value architecture
     value_mlp = MLP(
         in_features=input_shape[-1],
