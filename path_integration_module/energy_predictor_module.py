@@ -11,28 +11,33 @@ class EnergyPredictor(nn.Module):
                  num_head_cells: int, 
                  num_energy_heads: int,
                  num_cells: int,
-                 from_source: str,
                  use_dropout: bool,
-                 include_action: bool):
+                 from_source: str,
+                 delta: str,
+                 ):
         super().__init__()
         self.predict_heading = num_head_cells > 0
         self.predict_place = num_place_cells > 0
         self.predict_state = not (self.predict_heading or self.predict_place)
         self.from_source = from_source
-        self.include_action = include_action
-        #from_source == path_integration, current_state, delta
+        #from_source:previous_state, current_state
+        self.delta = delta
+        #delta: action, path, delta, none
 
         #first MLP should take in_features + 1 (vel) + n (n - 1) / 2 (rot)
         self.obs_dim = in_features_obs // num_cat_frames
         self.act_dim = in_features_act
-        if self.from_source == "path_integration":
-            input_dim = self.calculate_path_integration_input_dim()
-        elif self.from_source == "current_state":
-            input_dim = self.obs_dim
-        elif self.from_source == "old_state":
-            input_dim = self.obs_dim
-        elif self.from_source == "delta_state":
-            input_dim = 2*self.obs_dim
+        input_dim = self.obs_dim
+
+        if self.delta == "action":
+            input_dim += self.act_dim
+        elif self.delta == "path":
+            input_dim += 1 + self.obs_dim * (self.obs_dim - 1) // 2
+        elif self.delta == "delta":
+            input_dim += self.obs_dim
+        elif self.delta == "none":
+            input_dim += 0
+
         dropout = None
         if use_dropout:
             dropout = 0.5
@@ -61,32 +66,14 @@ class EnergyPredictor(nn.Module):
                             activate_last_layer=False,
                             dropout=dropout)
                     
-    def calculate_path_integration_input_dim(self):
-        if not self.include_action:
-            return self.obs_dim + 1 + self.obs_dim * (self.obs_dim - 1) // 2
-        else:
-            return self.obs_dim + 1 + self.obs_dim * (self.obs_dim - 1) // 2 + self.act_dim
-        
-    def calculate_current_state_input_dim(self):
-        if not self.include_action:            
-            return self.obs_dim
-        else:
-            return self.obs_dim + self.act_dim
-        
-    def calculate_old_state_input_dim(self, obs_dim):
-        if not self.include_action:
-            return obs_dim
-        else:
-            return obs_dim + self.act_dim
-        
     def create_current_state_input(self, t0_state, t1_state):
         return t1_state
     
-    def create_old_state_input(self, t0_state, t1_state):
+    def create_previous_state_input(self, t0_state, t1_state):
         return t0_state
     
     def create_delta_state_input(self, t0_state, t1_state):
-        return torch.cat((t0_state, (t1_state - t0_state)), dim=-1)
+        return (t1_state - t0_state)
 
     def create_path_integration_input(self, t0_state, t1_state):
         u = t0_state / torch.linalg.vector_norm(t0_state, dim=-1).unsqueeze(-1)
@@ -109,36 +96,49 @@ class EnergyPredictor(nn.Module):
         T_input = torch.linalg.vector_norm(t1_state - t0_state, dim=-1)
         T_input = T_input.unsqueeze(-1)
         # State + Vel + Rot
-        source = torch.cat((t0_state, T_input, R_input), dim=-1)
+        source = torch.cat((T_input, R_input), dim=-1)
+        source = torch.nan_to_num(source, nan=0.0, posinf=0.0, neginf=0.0)
         return source
 
     def forward(self, observation, prev_action):
         t0_state = observation[..., :observation.shape[-1]//2] #t0
         t1_state = observation[..., observation.shape[-1]//2:] #t1
-        if self.from_source == "path_integration":
-            integration_input = self.create_path_integration_input(t0_state, t1_state)
-            integration_input = torch.nan_to_num(integration_input, nan=0.0, posinf=0.0, neginf=0.0)
-        elif self.from_source == "current_state":
-            integration_input = self.create_current_state_input(t0_state, t1_state)
-        elif self.from_source == "old_state":
-            integration_input = self.create_old_state_input(t0_state, t1_state)
-        elif self.from_source == "delta_state":
-            integration_input = self.create_delta_state_input(t0_state, t1_state)
-        if self.include_action:
-            integration_input = torch.cat((integration_input, prev_action), dim=-1)
+        if self.from_source == "current_state":
+            input = self.create_current_state_input(t0_state, t1_state)
+        elif self.from_source == "previous_state":
+            input = self.create_previous_state_input(t0_state, t1_state)
 
-        integration_prediction = self.path_integration_model(integration_input) 
+        if self.delta == "action":
+            delta_input = prev_action
+            input = torch.cat((input, delta_input), dim=-1) 
+        elif self.delta == "path":
+            delta_input = self.create_path_integration_input(t0_state, t1_state)
+            input = torch.cat((input, delta_input), dim=-1) 
+        elif self.delta == "delta":
+            delta_input = self.create_delta_state_input(t0_state, t1_state)
+            input = torch.cat((input, delta_input), dim=-1) 
+        elif self.delta == "none":
+            pass
+
+        integration_prediction = self.path_integration_model(input)
+        state_prediction = None
+        place_energy_prediction = None
+        head_energy_prediction = None
+
         if self.predict_state:
             state_prediction = self.state_output_model(integration_prediction)
-            return integration_prediction, state_prediction
         
-        if self.predict_place and not self.predict_heading:
+        if self.predict_place:
             place_energy_prediction = self.place_energy_output_model(integration_prediction)
-            return integration_prediction, place_energy_prediction
 
-        if self.predict_heading and not self.predict_place:
+        if self.predict_heading:
             head_energy_prediction = self.head_energy_output_model(integration_prediction)
+
+        if self.predict_state:
+            return integration_prediction, state_prediction
+        elif self.predict_place and not self.predict_heading:
+            return integration_prediction, place_energy_prediction
+        elif self.predict_heading and not self.predict_place:
             return integration_prediction, head_energy_prediction
-        
-        #default:
-        return integration_prediction, place_energy_prediction, head_energy_prediction
+        else:
+            return integration_prediction, place_energy_prediction, head_energy_prediction

@@ -36,6 +36,8 @@ from tensordict.nn import TensorDictModule
 import tqdm
 from train_utils import get_project_root_path_vscode
 from energy_predictor_module import EnergyPredictor
+import random
+import numpy as np
 
 class PlaceCellActivationCalculator:
     def __init__(self, place_cell_centers):
@@ -92,16 +94,19 @@ class HeadCellActivationCalculator:
 class PlaceHeadPredictionLoss(nn.Module):
     def __init__(self, 
                  place_cell_activation_calculator,
-                 head_cell_activation_calculator):
+                 head_cell_activation_calculator,
+                 predict_state_mse: bool):
         super().__init__()
         self.ce_loss = nn.CrossEntropyLoss()
         self.mse_loss = nn.MSELoss()
+        self.cosine_loss = nn.CosineEmbeddingLoss()
         self.place_cell_activation_calculator = place_cell_activation_calculator
         self.head_cell_activation_calculator = head_cell_activation_calculator
         self.predict_heading = head_cell_activation_calculator is not None
         self.predict_place = place_cell_activation_calculator is not None
         self.predict_state = not (self.predict_heading or self.predict_place)
-        
+        self.predict_state_mse = predict_state_mse
+
     def calculate_heading(self, t0_state: torch.Tensor, t1_state: torch.Tensor):        
         heading = (t1_state - t0_state) / torch.linalg.vector_norm(t1_state - t0_state, dim=-1, keepdim=True)
         return heading
@@ -135,12 +140,20 @@ class PlaceHeadPredictionLoss(nn.Module):
             losses.append(head_loss)
 
         if self.predict_state:
-            state_prediction_key = "state_prediction"
-            state_loss = self.mse_loss(tensordict[state_prediction_key], t1_state)
-            loss_dict.update({
-                "state_loss": state_loss,
-            })
-            losses.append(state_loss)
+            if self.predict_state_mse:
+                state_prediction_key = "state_prediction"
+                state_loss = self.mse_loss(tensordict[state_prediction_key], t1_state)
+                loss_dict.update({
+                    "state_loss_mse": state_loss,
+                })
+                losses.append(state_loss)
+            else:
+                state_prediction_key = "state_prediction"
+                state_loss = self.cosine_loss(tensordict[state_prediction_key], t1_state, torch.ones(t1_state.shape[0], device=t1_state.device))
+                loss_dict.update({
+                    "state_loss_cosine": state_loss,
+                })
+                losses.append(state_loss)
 
         loss = sum(losses)
         loss_dict.update({
@@ -192,9 +205,10 @@ def main(cfg: "DictConfig"):  # noqa: F821
     cfg_predict_heading = cfg.energy_prediction.num_head_cells > 0
     cfg_predict_place = cfg.energy_prediction.num_place_cells > 0
     cfg_predict_state = not (cfg_predict_heading or cfg_predict_place)
+    cfg_predict_state_mse = cfg.energy_prediction.predict_state_mse
     cfg_from_source = cfg.energy_prediction.from_source
+    cfg_delta = cfg.energy_prediction.delta
     cfg_use_dropout = cfg.energy_prediction.use_dropout
-    cfg_include_action = cfg.energy_prediction.include_action
     transition_count = cfg_trajectory_length * cfg_num_trajectories
     storage_size = transition_count
     train_sampler = SliceSampler(slice_len=cfg_slice_len)
@@ -206,11 +220,15 @@ def main(cfg: "DictConfig"):  # noqa: F821
 
     project_root_path = get_project_root_path_vscode()
     replay_buffer.loads(project_root_path + f"{cfg_saved_rb_base_path}/{cfg_saved_rb_name}")
-    
+    torch.manual_seed(cfg_cell_seed)
+    torch.cuda.manual_seed(cfg_cell_seed)
+    random.seed(cfg_cell_seed)
+    np.random.seed(cfg_cell_seed)
+
     # Create logger
     logger = None
     if cfg.logger.backend:
-        exp_name = generate_exp_name("EModel", f"{cfg.logger.exp_name}")
+        exp_name = generate_exp_name("EModel", f"{cfg.logger.exp_name}_s_{cfg_cell_seed}")
         logger = get_logger(
             cfg.logger.backend,
             logger_name="energy_model",
@@ -235,7 +253,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
 
     
     loss_module = PlaceHeadPredictionLoss(place_cell_activation_calculator, 
-                                          head_cell_activation_calculator)
+                                          head_cell_activation_calculator,
+                                          predict_state_mse = cfg_predict_state_mse)
     
     test_data = replay_buffer.sample(cfg_batch_size) 
     test_observation = test_data["observation"]
@@ -247,20 +266,21 @@ def main(cfg: "DictConfig"):  # noqa: F821
                             cfg_num_head_cells, 
                             cfg_num_energy_heads,
                             cfg_model_num_cells,
+                            cfg_use_dropout,                            
                             cfg_from_source,
-                            cfg_use_dropout,
-                            cfg_include_action)
+                            cfg_delta,
+                        )
     out_keys =["integration_prediction"]
-    if cfg_predict_heading:
-        out_keys.append("head_energy_prediction") 
     if cfg_predict_place:
         out_keys.append("place_energy_prediction")
+    if cfg_predict_heading:
+        out_keys.append("head_energy_prediction") 
     if cfg_predict_state:
         out_keys.append("state_prediction")
 
     energy_prediction_module = TensorDictModule(
         model,
-        in_keys=["observation"],
+        in_keys=["observation", "prev_action"],
         out_keys=out_keys,
     )
     energy_prediction_module = energy_prediction_module.to(device)
@@ -269,8 +289,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
     cfg_pretrain_gradient_steps = cfg.optim.pretrain_gradient_steps #maybe config
     pbar = tqdm.tqdm(total=cfg_pretrain_gradient_steps)
     collected_steps = 0
-    for step in range(cfg_pretrain_gradient_steps):
-        if (step % 100 == 0):
+    for step in range(1, cfg_pretrain_gradient_steps + 1):
+        if (step % 100 == 0 or step == 1):
             additional_steps = step - collected_steps
             pbar.update(additional_steps)
             collected_steps = step
@@ -293,11 +313,16 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 "place_loss": place_loss.detach().cpu().item(),
             })
         if cfg_predict_state:
-            state_loss = loss_td["state_loss"]
-            log_info.update({
-                "state_loss": state_loss.detach().cpu().item(),
-            })
-
+            if cfg_predict_state_mse:
+                state_loss = loss_td["state_loss_mse"]
+                log_info.update({
+                    "state_loss_mse": state_loss.detach().cpu().item(),
+                })
+            else:
+                state_loss = loss_td["state_loss_cosine"]
+                log_info.update({
+                    "state_loss_cosine": state_loss.detach().cpu().item(),
+                })
         loss = loss_td["loss"]
         optimizer.zero_grad()        
         loss.backward()
@@ -331,8 +356,12 @@ def main(cfg: "DictConfig"):  # noqa: F821
             eval_place_losses.append(place_loss.detach().cpu().item())
 
         if cfg_predict_state:
-            state_loss = loss_td["state_loss"]
-            eval_state_losses.append(state_loss.detach().cpu().item())
+            if cfg_predict_state_mse:
+                state_loss = loss_td["state_loss_mse"]
+                eval_state_losses.append(state_loss.detach().cpu().item())
+            else:
+                state_loss = loss_td["state_loss_cosine"]
+                eval_state_losses.append(state_loss.detach().cpu().item())
 
         loss = loss_td["loss"]
         eval_losses.append(loss.detach().cpu().item())
@@ -362,9 +391,9 @@ def main(cfg: "DictConfig"):  # noqa: F821
     metadata["num_energy_heads"] = torch.tensor(cfg_num_energy_heads)
     metadata["num_cells"] = torch.tensor(cfg_model_num_cells)
     metadata["num_cat_frames"] = torch.tensor(cfg_num_cat_frames)
-    metadata["from_source"] = cfg_from_source
     metadata["use_dropout"] = torch.tensor(cfg_use_dropout)
-    metadata["include_action"] = torch.tensor(cfg_include_action)
+    metadata["from_source"] = cfg_from_source
+    metadata["delta"] = cfg_delta
     params = TensorDict.from_module(energy_prediction_module)
     model_dir = project_root_path + f"{cfg.artefacts.model_save_base_path}/{cfg.artefacts.model_save_dir}"
     if os.path.exists(model_dir):

@@ -38,13 +38,14 @@ def main(cfg: "DictConfig"):  # noqa: F821
     )
 
     # Create models (check utils_mujoco.py)
-    actor, critic, energy_prediction_module, mean_predict_module, scale_predict_module = make_ppo_models(cfg.env.env_name, cfg)
+    actor, critic, dual_policy_module, energy_prediction_module, mean_predict_module, scale_predict_module = make_ppo_models(cfg.env.env_name, cfg)
     actor, critic = actor.to(device), critic.to(device)
+    dual_policy_module = dual_policy_module.to(device)
 
     # Create collector
     collector = SyncDataCollector(
         create_env_fn=make_env(cfg.env.env_name, "cpu"),
-        policy=actor,
+        policy=dual_policy_module,
         frames_per_batch=cfg.collector.frames_per_batch,
         total_frames=cfg.collector.total_frames,
         device="cpu",

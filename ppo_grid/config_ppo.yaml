@@ -14,10 +14,9 @@ logger:
   project_name: Grid_Comparison
   group_name: null
   exp_name: PPO_Grid_Swimmer
-  test_interval: 10_000
+  test_interval: 1_000_000
   num_test_episodes: 5
   mode: disabled
-
 
 # Optim
 optim:
@@ -39,4 +38,4 @@ loss:
 
 energy_prediction:
   model_save_base_path: models
-  model_save_dir: model_state_swimmer_v5
+  model_save_dir: previous_state_path_state_cosine_nodropout_swimmer_v5

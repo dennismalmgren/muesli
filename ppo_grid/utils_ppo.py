@@ -59,7 +59,7 @@ def transfer_weights(source, target):
             layer_target.weight.data.copy_(source[str(ind), 'weight'].clone().data)
             layer_target.bias.data.copy_(source[str(ind), 'bias'].clone().data)
 
-def make_energy_prediction_module(input_shape, cfg) -> EnergyPredictor:
+def make_energy_prediction_module(num_inputs, num_outputs, cfg) -> EnergyPredictor:
     model_save_base_path = cfg.energy_prediction.model_save_base_path
     model_save_dir = cfg.energy_prediction.model_save_dir
     metadata = TensorDict({}).load_memmap(get_project_root_path_vscode() + 
@@ -75,18 +75,20 @@ def make_energy_prediction_module(input_shape, cfg) -> EnergyPredictor:
     cfg_predict_place = cfg_num_place_cells > 0
     cfg_predict_state = not (cfg_predict_heading or cfg_predict_place)
     cfg_from_source = metadata["from_source"]
+    cfg_delta = metadata["delta"]
     cfg_use_dropout = metadata["use_dropout"].item()
-    cfg_include_action = metadata["include_action"].item()
 
-    predictor_module = EnergyPredictor(in_features = input_shape[-1], 
+    predictor_module = EnergyPredictor(in_features_obs = num_inputs, 
+                                        in_features_act = num_outputs,
                                        num_cat_frames=cfg_num_cat_frames,
                                        num_place_cells=cfg_num_place_cells, 
                                        num_head_cells=cfg_num_head_cells, 
                                        num_energy_heads=cfg_num_energy_heads,
                                        num_cells=cfg_model_num_cells,
                                        from_source=cfg_from_source,
-                                       use_state_dropout = cfg_use_dropout,
-                                       include_action = cfg_include_action)
+                                       delta = cfg_delta,
+                                       use_dropout = cfg_use_dropout,
+                                       )
     
     predictor_module.eval()
     out_keys = ["integration_prediction"]
@@ -99,7 +101,7 @@ def make_energy_prediction_module(input_shape, cfg) -> EnergyPredictor:
 
     energy_prediction_module = TensorDictModule(
         predictor_module,
-        in_keys=["observation"],
+        in_keys=["observation", "prev_action"],
         out_keys=out_keys,
     )
     
@@ -126,6 +128,7 @@ def make_ppo_models_state(proof_environment, cfg):
     input_shape = proof_environment.observation_spec["observation"].shape
 
     # Define policy output distribution class
+    num_inputs = input_shape[-1]
     num_outputs = proof_environment.action_spec.shape[-1]
     distribution_class = TanhNormal
     distribution_kwargs = {
@@ -134,7 +137,7 @@ def make_ppo_models_state(proof_environment, cfg):
         "tanh_loc": False,
     }
 
-    energy_prediction_module = make_energy_prediction_module(input_shape, cfg)
+    energy_prediction_module = make_energy_prediction_module(num_inputs, num_outputs, cfg)
     
     # Define policy architecture
     policy_mlp = MLP(
@@ -182,7 +185,7 @@ def make_ppo_models_state(proof_environment, cfg):
         in_keys=["action"],
         out_keys=[("next", "prev_action")],
     )
-    policy_module = TensorDictSequential(policy_module, copyModule)
+    dual_policy_module = TensorDictSequential(policy_module, copyModule)
     # Define value architecture
     value_mlp = MLP(
         in_features=input_shape[-1],
@@ -203,13 +206,13 @@ def make_ppo_models_state(proof_environment, cfg):
         in_keys=["observation"],
     )
 
-    return policy_module, value_module, energy_prediction_module, mean_predict_module, scale_predict_module
+    return policy_module, value_module, dual_policy_module, energy_prediction_module, mean_predict_module, scale_predict_module
 
 
 def make_ppo_models(env_name, cfg):
     proof_environment = make_env(env_name, device="cpu")
-    actor, critic, energy_prediction_module, mean_predict_module, scale_predict_module = make_ppo_models_state(proof_environment, cfg)
-    return actor, critic, energy_prediction_module, mean_predict_module, scale_predict_module
+    actor, critic, dual_policy_module, energy_prediction_module, mean_predict_module, scale_predict_module = make_ppo_models_state(proof_environment, cfg)
+    return actor, critic, dual_policy_module, energy_prediction_module, mean_predict_module, scale_predict_module
 
 
 # ====================================================================
