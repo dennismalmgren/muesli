@@ -6,17 +6,17 @@ env:
 # collector
 collector:
   frames_per_batch: 2048
-  total_frames: 10_000
+  total_frames: 1_000_000
 
 # logger
 logger:
   backend: wandb
-  project_name: Grid_Comparison
+  project_name: compare_predict
   group_name: null
-  exp_name: PPO_Grid_Swimmer
-  test_interval: 1_000_000
+  exp_name: predict_swimmer_v5
+  test_interval: 10_000
   num_test_episodes: 5
-  mode: disabled
+  mode: online
 
 # Optim
 optim:
