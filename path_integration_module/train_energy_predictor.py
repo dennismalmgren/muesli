@@ -324,6 +324,9 @@ def main(cfg: "DictConfig"):  # noqa: F821
                     "state_loss_cosine": state_loss.detach().cpu().item(),
                 })
         loss = loss_td["loss"]
+        log_info.update({
+                    "loss": loss.detach().cpu().item(),
+                })
         optimizer.zero_grad()        
         loss.backward()
 

@@ -11,8 +11,8 @@ collector:
 # logger
 logger:
   backend: wandb
-  project_name: compare_predict
-  group_name: null
+  project_name: compare_predictors
+  group_name: previous_state_path_energy_place_head_dropout_no_eval_swimmer_v5
   exp_name: predict_swimmer_v5
   test_interval: 10_000
   num_test_episodes: 5
@@ -38,4 +38,6 @@ loss:
 
 energy_prediction:
   model_save_base_path: models
-  model_save_dir: previous_state_path_state_cosine_nodropout_swimmer_v5
+  model_save_dir: previous_state_path_energy_place_head_dropout_swimmer_v5
+
+

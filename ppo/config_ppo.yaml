@@ -10,9 +10,9 @@ collector:
 # logger
 logger:
   backend: wandb
-  project_name: Grid_Comparison
-  group_name: PPO_Swimmer_Double
-  exp_name: PPO_Swimmer_Double
+  project_name: compare_predictors
+  group_name: baseline
+  exp_name: PPO
   test_interval: 10_000
   num_test_episodes: 5
   mode: online

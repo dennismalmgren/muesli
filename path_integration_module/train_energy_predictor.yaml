@@ -20,26 +20,26 @@ optim:
 logger:
   backend: wandb
   project_name: energy_predictor
-  group_name: null
-  exp_name: Predict_Place
+  group_name: current_state_none_energy_place_n_head_dropout_swimmer_v5
+  exp_name: predictor
   test_interval: 1_000
   num_test_episodes: 5
   mode: online
 
 artefacts:
   model_save_base_path: models
-  model_save_dir: previous_state_action_energy_place_dropout_swimmer_v5
+  model_save_dir: current_state_none_energy_place_n_head_dropout_swimmer_v5
 
 energy_prediction:
-  seed: 42
+  seed: 100
 
 #inputs
-  from_source: "previous_state" #previous_state, current_state
+  from_source: "current_state" #previous_state, current_state
   delta: "none" #action, path, delta, none
   use_dropout: True
 #outputs
   num_place_cells: 256
-  num_head_cells: 12
+  num_head_cells: 256
   num_energy_heads: 256
   num_cells: 256
   predict_state_mse: False
