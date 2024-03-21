@@ -1,7 +1,7 @@
 # task and env
 env:
 #  env_name: HalfCheetah-v4
-  env_name: Swimmer-v5
+  env_name: Humanoid-v5
 
 # collector
 collector:

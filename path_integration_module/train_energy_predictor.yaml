@@ -1,7 +1,7 @@
 # task and env
 env:
   #env_name: HalfCheetah-v4
-  env_name: Swimmer-v5
+  env_name: Humanoid-v5
   episode_max_len: 1000
 
 rb:
@@ -9,7 +9,7 @@ rb:
   trajectory_length: 1000
   slice_len: 1
   batch_size: 2000
-  saved_dir: random_buffer_swimmer_v5
+  saved_dir: random_buffer_humanoid_v5
   saved_base_path: data
   num_cat_frames: 2
 
