@@ -6,3 +6,5 @@ hydra-core
 hydra-submitit-launcher
 matplotlib
 tqdm
+transformers
+
