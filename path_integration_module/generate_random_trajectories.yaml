@@ -1,6 +1,6 @@
 # task and env
 env:
-  env_name: Humanoid-v5
+  env_name: Walker2D-v5
   episode_max_len: 1000
 
 rb:
