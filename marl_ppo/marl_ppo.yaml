@@ -1,0 +1,24 @@
+# task and env
+env:
+  env_name: MatchingPennies
+
+seed: 0
+
+collector:
+  frames_per_batch: 400
+  total_frames: 400000
+  env_per_collector: 10
+
+loss:
+  mini_batch_size: 100
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  loss_critic_type: l2
+  entropy_coef: 0.0
+  critic_coef: 1.0
+  ppo_epochs: 3
+  
+optim:
+  lr: 3e-4
+  weight_decay: 0.0
