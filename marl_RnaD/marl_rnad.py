@@ -31,6 +31,8 @@ from torchrl.objectives import ClipPPOLoss
 from torchrl.objectives.value.advantages import GAE
 from tensordict import TensorDictBase
 
+from .marl_rnad_loss import RnadLoss
+
 def process_batch(group_map, batch: TensorDictBase) -> TensorDictBase:
     """
     If the `(group, "terminated")` and `(group, "done")` keys are not present, create them by expanding
@@ -56,7 +58,7 @@ def process_batch(group_map, batch: TensorDictBase) -> TensorDictBase:
             )
     return batch
 
-@hydra.main(config_path=".", config_name="marl_ppo", version_base="1.1")
+@hydra.main(config_path=".", config_name="marl_rnad", version_base="1.1")
 def main(cfg: "DictConfig"):  # noqa: F821
     torch.manual_seed(cfg.seed)
     is_fork = multiprocessing.get_start_method() == "fork"
@@ -115,25 +117,22 @@ def main(cfg: "DictConfig"):  # noqa: F821
     print("Shape of the rollout TensorDict:", rollout.batch_size)
     
     policy_modules = {}
-    policy_net = None
-    policy_module = None
-
     for group, agents in env.group_map.items():
         share_parameters_policy = True  # Can change this based on the group
-        if policy_net is None:
-            policy_net = MultiAgentMLP(
-                n_agent_inputs=env.observation_spec[group, "observation"].shape[
-                    -1
-                ],  # n_obs_per_agent
-                n_agent_outputs=env.full_action_spec[group, "action"].n,  # n_actions_per_agents
-                n_agents=len(agents),  # Number of agents in the group
-                centralised=False,  # the policies are decentralised (i.e., each agent will act from its local observation)
-                share_params=share_parameters_policy,
-                device=device,
-                depth=2,
-                num_cells=256,
-                activation_class=torch.nn.ReLU,
-            )
+
+        policy_net = MultiAgentMLP(
+            n_agent_inputs=env.observation_spec[group, "observation"].shape[
+                -1
+            ],  # n_obs_per_agent
+            n_agent_outputs=env.full_action_spec[group, "action"].n,  # n_actions_per_agents
+            n_agents=len(agents),  # Number of agents in the group
+            centralised=False,  # the policies are decentralised (i.e., each agent will act from its local observation)
+            share_params=share_parameters_policy,
+            device=device,
+            depth=2,
+            num_cells=256,
+            activation_class=torch.nn.ReLU,
+        )
 
         policy_module = TensorDictModule(
                 policy_net,
@@ -159,8 +158,6 @@ def main(cfg: "DictConfig"):  # noqa: F821
         policies[group] = policy
 
     critics = {}
-    critic_net = None
-
     for group, agents in env.group_map.items():
         share_parameters_critic = True  # Can change for each group
         MADDPG = True  # IDDPG if False, can change for each group
@@ -171,24 +168,23 @@ def main(cfg: "DictConfig"):  # noqa: F821
         #     in_keys=[(group, "observation"), (group, "action")],
         #     out_keys=[(group, "obs_action")],
         # )
-        if critic_net is None:
-            critic_net = MultiAgentMLP(
-                    n_agent_inputs=env.observation_spec[group, "observation"].shape[-1],
-            #     + env.full_action_spec[group, "action"].shape[-1],
-                    n_agent_outputs=1,  # 1 value per agent
-                    n_agents=len(agents),
-                    centralised=MADDPG,
-                    share_params=share_parameters_critic,
-                    device=device,
-                    depth=2,
-                    num_cells=256,
-                    activation_class=torch.nn.Tanh,
-                )
+
         critic_module = TensorDictModule(
-            module=critic_net,
+            module=MultiAgentMLP(
+                n_agent_inputs=env.observation_spec[group, "observation"].shape[-1],
+           #     + env.full_action_spec[group, "action"].shape[-1],
+                n_agent_outputs=1,  # 1 value per agent
+                n_agents=len(agents),
+                centralised=MADDPG,
+                share_params=share_parameters_critic,
+                device=device,
+                depth=2,
+                num_cells=256,
+                activation_class=torch.nn.Tanh,
+            ),
             in_keys=[(group, "observation")],  # Read ``(group, "obs_action")``
             out_keys=[
-                (group, "state_value")
+                (group, "state_action_value")
             ],  # Write ``(group, "state_action_value")``
         )
 
@@ -214,30 +210,34 @@ def main(cfg: "DictConfig"):  # noqa: F821
         frames_per_batch=frames_per_batch,
         total_frames=total_frames,
         storing_device=device,
-        max_frames_per_traj = -1
+        max_frames_per_traj = -1,
+        reset_at_each_iter=True,
     )
 
     replay_buffers = {}
     for group, _agents in env.group_map.items():
+        prefetch = 3,
+        buffer_size = 1e6,
+        scratch_dir=None,
+        batch_size=cfg.loss.mini_batch_size,
         # Create data buffer
-        sampler = SamplerWithoutReplacement()
         replay_buffer = TensorDictReplayBuffer(
-            storage=LazyMemmapStorage(cfg.collector.frames_per_batch),
-            sampler=sampler,
-            batch_size=cfg.loss.mini_batch_size,
+            pin_memory=False,
+            prefetch=prefetch,
+            storage=LazyMemmapStorage(
+                buffer_size,
+                scratch_dir=scratch_dir,
+                device=device,
+            ),
+            batch_size=batch_size,
         )
+
         replay_buffers[group] = replay_buffer
 
     losses = {}
     for group, _agents in env.group_map.items():
         # Create loss and adv modules
-        adv_module = GAE(
-            gamma=cfg.loss.gamma,
-            lmbda=cfg.loss.gae_lambda,
-            value_network=critics[group],
-            average_gae=True,
-            device=device
-        )
+        loss_module = RnadLoss()
 
         loss_module = ClipPPOLoss(
             actor_network=policies[group],
