@@ -126,26 +126,9 @@ def main(cfg: "DictConfig"):  # noqa: F821
 
     num_iters = 100
 
-    pbar = tqdm.tqdm(
-        total=100,
-        desc=", ".join(
-            [f"episode_reward_mean_{group} = 0" for group in env.group_map.keys()]
-        ),
-    )
-    sampling_start = time.time()
-
-    episode_reward_mean_map = {group: [] for group in env.group_map.keys()}
-    train_group_map = copy.deepcopy(env.group_map)
-    collected_frames = 0
-
-    reg_param = 0.2  # Initial regularization parameter
-
     for i in range(num_iters):
-        log_info = {}
         groups = list(env.group_map.keys())
-        policy_gradients = {
-            group: torch.tensor([0.0, 0.0]) for group in env.group_map.keys()
-        }
+
         for fix_iter in range(5):
             policy_reg_modules = {
                 group: policy_modules[group].clone()
@@ -174,44 +157,6 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 policy_modules[groups[1]] = policy_modules[groups[1]] / policy_modules[groups[1]].sum()
             print(f"Fix iter: {fix_iter}, policy_modules: {policy_modules}")
         print('Ok')
-        frames_in_batch = data.numel()
-        collected_frames += frames_in_batch
-        pbar.update(data.numel())
-        batch = process_batch(train_group_map, data)
-
-        transformed_rewards = reward_transformation(batch.get(("next", group, "reward")), policies, reg_param)
-        batch.update({"reward": transformed_rewards})
-
-        training_start = time.time()
-        for group in train_group_map.keys():
-            group_batch = batch.exclude(
-                *[
-                    key
-                    for _group in train_group_map.keys()
-                    if _group != group
-                    for key in [_group, ("next", _group)]
-                ]
-            )
-          
-
-        for group in train_group_map.keys(): 
-            episode_reward_mean = (
-                data.get(("next", group, "episode_reward"))[
-                    data.get(("next", group, "done"))
-                ]
-                .mean()
-                .item()
-            )
-            episode_reward_mean_map[group].append(episode_reward_mean)
-        pbar.set_description(
-            ", ".join(
-                [
-                    f"episode_reward_mean_{group} = {episode_reward_mean_map[group][-1]}"
-                    for group in env.group_map.keys()
-                ]
-            ),
-            refresh=False,
-        )
-        pbar.update()
+       
 if __name__ == "__main__":
     main()
