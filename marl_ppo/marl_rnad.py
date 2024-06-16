@@ -3,6 +3,7 @@ import hydra
 from torchrl._utils import logger as torchrl_logger
 from torch import multiprocessing
 import tqdm
+from torchrl.envs import step_mdp
 from torchrl.envs.libs import PettingZooWrapper
 from envs.matching_pennies_env import MatchingPenniesEnv
 from torchrl.envs import (
@@ -26,6 +27,7 @@ from torchrl.modules import (
 import time
 from tensordict.nn import TensorDictModule, TensorDictSequential
 from torch.distributions import Categorical
+from torchrl.modules.distributions import MaskedCategorical
 from torchrl.collectors import SyncDataCollector
 from torchrl.data import LazyMemmapStorage, TensorDictReplayBuffer
 from torchrl.data.replay_buffers.samplers import SamplerWithoutReplacement
@@ -77,7 +79,6 @@ def main(cfg: "DictConfig"):  # noqa: F821
     
     env = TransformedEnv(
         base_env,
-        
         Compose(
             RewardSum( 
                 in_keys=base_env.reward_keys,
@@ -92,67 +93,28 @@ def main(cfg: "DictConfig"):  # noqa: F821
         ),
     )
                      
-    def make_env(cfg):
-        def env_maker(cfg):
-            base_env = MatchingPenniesEnv()
-            base_env = PettingZooWrapper(base_env, device=device)
-            return base_env
-        
-        parallel_env = ParallelEnv(
-            cfg.collector.env_per_collector,
-            EnvCreator(lambda cfg=cfg: env_maker(cfg)),
-        )
-        env = TransformedEnv(
-            parallel_env,
-            Compose(
-            RewardSum( 
-                in_keys=base_env.reward_keys,
-                reset_keys=["_reset"] * len(base_env.group_map.keys()),
-            ),
-            DTypeCastTransform(dtype_in=torch.int8, dtype_out=torch.float32,
-                           in_keys=[("player_1", "observation", "observation"),
-                            ("player_2", "observation", "observation")]),
-        ),
-        )
-
-        return env
+    
     
     check_env_specs(env)
 
     policy_modules = {}
-
+    policy_net = None
     for group, agents in env.group_map.items():
-
-        # share_parameters_policy = True
-        # policy_net = MultiAgentMLP(
-        #     n_agent_inputs=env.observation_spec[group, "observation"].shape[-1],
-        #     n_agent_outputs=env.full_action_spec[group, "action"].n,
-        #     n_agents=len(agents),
-        #     centralised=False,
-        #     share_params=share_parameters_policy,
-        #     device=device,
-        #     depth=2,
-        #     num_cells=256,
-        #     activation_class=torch.nn.ReLU,
-        # )
-        policy_net = MLP(
-            in_features = env.observation_spec[group, "observation", "observation"].shape[-1],
-            out_features = env.full_action_spec[group, "action"].n,
-#            n_agent_inputs=env.observation_spec[group, "observation"].shape[-1],
-#            n_agent_outputs=env.full_action_spec[group, "action"].n,
-#            n_agents=len(agents),
-#            centralised=False,
-            #share_params=share_parameters_policy,
-            device=device,
-            depth=2,
-            num_cells=256,
-            activation_class=torch.nn.ReLU,
-        )
+        if policy_net is None:
+            policy_net = MLP(
+                in_features = env.observation_spec[group, "observation", "observation"].shape[-1],
+                out_features = env.full_action_spec[group, "action"].n,
+                device=device,
+                depth=2,
+                num_cells=256,
+                activation_class=torch.nn.ReLU,
+            )
         policy_module = TensorDictModule(
                 policy_net,
                 in_keys=[(group, "observation", "observation")],
                 out_keys=[(group, "logits")],
             )
+        
         policy_modules[group] = policy_module
 
     policies = {}
@@ -160,44 +122,29 @@ def main(cfg: "DictConfig"):  # noqa: F821
         policy = ProbabilisticActor(
             module=policy_modules[group],
             spec=env.full_action_spec[group, "action"],
-            in_keys=[(group, "logits")],
+            in_keys={
+                "logits": (group, "logits"),
+                "mask": (group, "action_mask")
+            },
             out_keys=[(group, "action")],
-            distribution_class=Categorical,
+            distribution_class=MaskedCategorical,
             return_log_prob=True,
         )
         policy = policy.to(device)
         policies[group] = policy
 
     critics = {}
-
+    critic_net = None
     for group, agents in env.group_map.items():
-
-        critic_net = MLP(
-            in_features = env.observation_spec[group, "observation", "observation"].shape[-1],
-            out_features = 1,
-#            n_agent_inputs=env.observation_spec[group, "observation"].shape[-1],
-#            n_agent_outputs=1,
-#            n_agents=len(agents),
-#            centralised=MADDPG,
-#            share_params=share_parameters_critic,
-            device=device,
-            depth=2,
-            num_cells=256,
-            activation_class=torch.nn.Tanh,
-        )
-        # share_parameters_critic = True
-        # MADDPG = True
-        # critic_net = MultiAgentMLP(
-        #     n_agent_inputs=env.observation_spec[group, "observation"].shape[-1],
-        #     n_agent_outputs=1,
-        #     n_agents=len(agents),
-        #     centralised=MADDPG,
-        #     share_params=share_parameters_critic,
-        #     device=device,
-        #     depth=2,
-        #     num_cells=256,
-        #     activation_class=torch.nn.Tanh,
-        # )
+        if critic_net is None:
+            critic_net = MLP(
+                in_features = env.observation_spec[group, "observation", "observation"].shape[-1],
+                out_features = 1,
+                device=device,
+                depth=2,
+                num_cells=256,
+                activation_class=torch.nn.Tanh,
+            )
         critic_module = TensorDictModule(
             module=critic_net,
             in_keys=[(group, "observation", "observation")],
@@ -214,10 +161,10 @@ def main(cfg: "DictConfig"):  # noqa: F821
         td_res = critics[group](td_step)
     
     agents_exploration_policy = TensorDictSequential(*policies.values())
-    num_mini_batches = cfg.collector.frames_per_batch // cfg.loss.mini_batch_size
-    frames_per_batch = cfg.collector.frames_per_batch
-    total_frames = cfg.collector.total_frames
-    cfg_loss_ppo_epochs = cfg.loss.ppo_epochs
+    #num_mini_batches = cfg.collector.frames_per_batch // cfg.loss.mini_batch_size
+    #frames_per_batch = cfg.collector.frames_per_batch
+    #total_frames = cfg.collector.total_frames
+    #cfg_loss_ppo_epochs = cfg.loss.ppo_epochs
 
     # collector = SyncDataCollector(
     #     create_env_fn=make_env(cfg),
@@ -300,24 +247,40 @@ def main(cfg: "DictConfig"):  # noqa: F821
     episode_reward_mean_map = {group: [] for group in env.group_map.keys()}
     train_group_map = copy.deepcopy(env.group_map)
     collected_frames = 0
-
-    reg_param = 0.2  # Initial regularization parameter
+    reward_keys = [(group, "reward") for group in env.group_map.keys()]
+    done_keys = [(group, "done") for group in env.group_map.keys()]
+    action_keys = [(group, "action") for group in env.group_map.keys()]
     for i in range(2):
-        td0 = env.reset()
-        policies['player_1'](td0)
-        td1 = env.step(td0)
-        policies['player_2'](td1)
-        td2 = env.step(td1)
-        data = td2
-
+        episode_tds = []
+        td = env.reset()
+        done = False
+        while not done:
+            td = td.to(device)
+            td = agents_exploration_policy(td)
+            td = td.to('cpu')
+            td = env.step(td)
+            episode_tds.append(td)
+            td = step_mdp(td, reward_keys=reward_keys, done_keys=done_keys, action_keys=action_keys)
+            done = torch.any(td['done'])
+        
+        episode = torch.stack(episode_tds)
     #for i, data in enumerate(collector):
         log_info = {}
         sampling_time = time.time() - sampling_start
-        frames_in_batch = data.numel()
-        collected_frames += frames_in_batch
-        pbar.update(data.numel())
-        batch = process_batch(train_group_map, data)
+       
+        pbar.update(1) #count episodes instead
+        batch = process_batch(train_group_map, episode)
+        #construct trajectory
+        #observations for acting player
+        batch_obs = torch.zeros_like(batch['player_1', 'observation', 'observation'])
+        batch_obs[batch['player_1', 'mask']] = batch['player_1', 'observation', 'observation'][batch['player_1', 'mask']]
+        batch_obs[batch['player_2', 'mask']] = batch['player_2', 'observation', 'observation'][batch['player_2', 'mask']]
 
+        batch_act = torch.zeros_like(batch['player_1', 'action'])
+        batch_act[batch['player_1', 'mask']] = batch['player_1', 'action'][batch['player_1', 'mask']]
+        batch_act[batch['player_2', 'mask']] = batch['player_2', 'action'][batch['player_2', 'mask']]
+        #rewards
+        
         #transformed_rewards = reward_transformation(batch.get(("next", group, "reward")), policies, reg_param)
         #batch.update({"reward": transformed_rewards})
 

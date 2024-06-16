@@ -7,4 +7,4 @@ hydra-submitit-launcher
 matplotlib
 tqdm
 transformers
-
+pygame
