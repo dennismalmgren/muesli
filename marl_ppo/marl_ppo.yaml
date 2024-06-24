@@ -22,3 +22,4 @@ loss:
 optim:
   lr: 3e-4
   weight_decay: 0.0
+  tau: 1.0
