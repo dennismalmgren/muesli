@@ -52,7 +52,7 @@ class MatchingPenniesEnv(ParallelEnv):
             (1, 0): (-1, 1),
             (1, 1): (1, -1)
         }
-        step_reward = reward_dict[(actions["1"], actions["2"])]
+        step_reward = reward_dict[(actions["1"].item(), actions["2"].item())]
         obs = {
             "1": np.array([0.0]),
             "2": np.array([0.0])
