@@ -43,7 +43,7 @@ def step_network(network, pseudo_grad, optimizer):
         param_length = param.numel()  # Number of elements in the parameter
         # Assign the gradient manually (detach the grad tensor to avoid autograd tracking)
         grad = pseudo_grad_vector[start:start + param_length].view_as(param).detach()
-        param.grad = grad  # Set the gradient
+        param.grad = -grad  # Set the gradient
         start += param_length
 
     # Perform the optimization step (SGD step)
