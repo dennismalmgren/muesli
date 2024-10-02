@@ -1,0 +1,5 @@
+# task and env
+env:
+  env_name: ColonelBlottoParallelEnv
+
+seed: 42

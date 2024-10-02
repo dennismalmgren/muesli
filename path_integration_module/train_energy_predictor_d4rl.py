@@ -34,10 +34,11 @@ from torch import nn
 from tensordict import TensorDictBase
 from tensordict.nn import TensorDictModule
 import tqdm
-from train_utils import get_project_root_path_vscode, load_d4rl_rb
+from train_utils import get_project_root_path_vscode
 from energy_predictor_module import EnergyPredictor
 import random
 import numpy as np
+from torchrl.data.datasets.d4rl import D4RLExperienceReplay
 
 class PlaceCellActivationCalculator:
     def __init__(self, place_cell_centers):
@@ -187,15 +188,15 @@ def create_head_cell_centers(replay_buffer, num_head_cells, cell_seed):
     head_cell_centers = head_cell_centers / torch.linalg.norm(head_cell_centers, dim=-1, keepdim=True)
     return head_cell_centers
 
-@hydra.main(config_path=".", config_name="train_energy_predictor", version_base="1.1")
+@hydra.main(config_path=".", config_name="train_energy_predictor_d4rl", version_base="1.1")
 def main(cfg: "DictConfig"):  # noqa: F821
     device = "cpu" if not torch.cuda.device_count() else "cuda"
-    #cfg_num_trajectories = cfg.rb.num_trajectories
-    #cfg_trajectory_length = cfg.rb.trajectory_length
+    cfg_num_trajectories = cfg.rb.num_trajectories
+    cfg_trajectory_length = cfg.rb.trajectory_length
     cfg_slice_len = cfg.rb.slice_len #use first to predict the second
     cfg_batch_size = cfg.rb.batch_size
-    #cfg_saved_rb_base_path = cfg.rb.saved_base_path
-    #cfg_saved_rb_name = cfg.rb.saved_dir
+    cfg_saved_rb_base_path = cfg.rb.saved_base_path
+    cfg_saved_rb_name = cfg.rb.saved_dir
     cfg_num_place_cells = cfg.energy_prediction.num_place_cells
     cfg_num_head_cells = cfg.energy_prediction.num_head_cells
     cfg_num_energy_heads = cfg.energy_prediction.num_energy_heads
@@ -209,19 +210,31 @@ def main(cfg: "DictConfig"):  # noqa: F821
     cfg_from_source = cfg.energy_prediction.from_source
     cfg_delta = cfg.energy_prediction.delta
     cfg_use_dropout = cfg.energy_prediction.use_dropout
-    #transition_count = cfg_trajectory_length * cfg_num_trajectories
-    #storage_size = transition_count
-    rb = load_d4rl_rb(2048)
-    
-    #train_sampler = SliceSampler(slice_len=cfg_slice_len)
-    #replay_buffer = TensorDictReplayBuffer(
-    #    storage=LazyMemmapStorage(storage_size, ndim=2),
-    #    sampler=train_sampler,
-    #    batch_size=cfg_batch_size,
-    #)
+    transition_count = cfg_trajectory_length * cfg_num_trajectories
+    storage_size = transition_count
 
-    #project_root_path = get_project_root_path_vscode()
-    #replay_buffer.loads(project_root_path + f"{cfg_saved_rb_base_path}/{cfg_saved_rb_name}")
+
+    data = D4RLExperienceReplay(
+        dataset_id=rb_cfg.dataset,
+        split_trajs=True,
+        batch_size=rb_cfg.batch_size,
+        sampler=RandomSampler(),  # SamplerWithoutReplacement(drop_last=False),
+        transform=None,
+        use_truncated_as_done=True,
+        direct_download=True,
+        prefetch=4,
+        writer=RoundRobinWriter(),
+    )
+
+    train_sampler = SliceSampler(slice_len=cfg_slice_len)
+    replay_buffer = TensorDictReplayBuffer(
+        storage=LazyMemmapStorage(storage_size, ndim=2),
+        sampler=train_sampler,
+        batch_size=cfg_batch_size,
+    )
+
+    project_root_path = get_project_root_path_vscode()
+    replay_buffer.loads(project_root_path + f"{cfg_saved_rb_base_path}/{cfg_saved_rb_name}")
     torch.manual_seed(cfg_cell_seed)
     torch.cuda.manual_seed(cfg_cell_seed)
     random.seed(cfg_cell_seed)
@@ -244,12 +257,12 @@ def main(cfg: "DictConfig"):  # noqa: F821
         )
     place_cell_activation_calculator = None
     if cfg_predict_place:
-        place_cell_centers = create_place_cell_centers(rb, cfg_num_place_cells, cfg_cell_seed)
+        place_cell_centers = create_place_cell_centers(replay_buffer, cfg_num_place_cells, cfg_cell_seed)
         place_cell_centers = place_cell_centers.to(device)
         place_cell_activation_calculator = PlaceCellActivationCalculator(place_cell_centers)
     head_cell_activation_calculator = None
     if cfg_predict_heading:
-        head_cell_centers = create_head_cell_centers(rb, cfg_num_head_cells, cfg_cell_seed)
+        head_cell_centers = create_head_cell_centers(replay_buffer, cfg_num_head_cells, cfg_cell_seed)
         head_cell_centers = head_cell_centers.to(device)
         head_cell_activation_calculator = HeadCellActivationCalculator(head_cell_centers)
 
@@ -258,7 +271,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
                                           head_cell_activation_calculator,
                                           predict_state_mse = cfg_predict_state_mse)
     
-    test_data = rb.sample(cfg_batch_size) 
+    test_data = replay_buffer.sample(cfg_batch_size) 
     test_observation = test_data["observation"]
     test_prev_action = test_data["prev_action"]
     model = EnergyPredictor(test_observation.shape[-1], 
@@ -297,7 +310,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
             pbar.update(additional_steps)
             collected_steps = step
         log_info = {}
-        data = rb.sample(cfg_batch_size)
+        data = replay_buffer.sample(cfg_batch_size)
 
         data = data.to(device)
 

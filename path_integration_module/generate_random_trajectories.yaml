@@ -1,10 +1,11 @@
 # task and env
 env:
-  env_name: Swimmer-v5
+  env_name: Walker2D-v5
   episode_max_len: 1000
 
 rb:
   save_base_path: data
+  save_dir: random_buffer_humanoid_v5
   save_dir: random_buffer_single_swimmer_v5
 
 collector:

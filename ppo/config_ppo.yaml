@@ -1,6 +1,6 @@
 # task and env
 env:
-  env_name: Swimmer-v5
+  env_name: Humanoid-v5
 
 # collector
 collector:
@@ -11,7 +11,7 @@ collector:
 logger:
   backend: wandb
   project_name: compare_predictors
-  group_name: baseline
+  group_name: baseline_humanoid
   exp_name: PPO
   test_interval: 10_000
   num_test_episodes: 5

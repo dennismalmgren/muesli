@@ -11,7 +11,7 @@ rb:
   batch_size: 2000
   saved_dir: random_buffer_humanoid_v5
   saved_base_path: data
-  num_cat_frames: 1
+  num_cat_frames: 2
 
 optim:
   pretrain_gradient_steps: 10_000
@@ -24,7 +24,7 @@ logger:
   exp_name: predictor
   test_interval: 1_000
   num_test_episodes: 5
-  mode: disabled
+  mode: online
 
 artefacts:
   model_save_base_path: models
@@ -35,7 +35,7 @@ energy_prediction:
 
 #inputs
   from_source: "current_state" #previous_state, current_state
-  delta: "single" #action, path, delta, none, single
+  delta: "none" #action, path, delta, none
   use_dropout: True
 #outputs
   num_place_cells: 256
