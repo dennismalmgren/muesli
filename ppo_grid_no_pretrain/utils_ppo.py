@@ -44,7 +44,7 @@ def make_env(env_name="HalfCheetah-v4", device="cpu"):
     env = TransformedEnv(env)
     #env.append_transform(VecNorm(in_keys=["observation"], decay=0.99999, eps=1e-2))
     #env.append_transform(ClipTransform(in_keys=["observation"], low=-10, high=10))
-    env.append_transform(CatFrames(2, in_keys=["observation"], dim=-1, padding="constant"))
+    #env.append_transform(CatFrames(2, in_keys=["observation"], dim=-1, padding="constant"))
     env.append_transform(RewardSum())
     env.append_transform(StepCounter())
     env.append_transform(DoubleToFloat(in_keys=["observation"]))
@@ -53,30 +53,30 @@ def make_env(env_name="HalfCheetah-v4", device="cpu"):
     return env
 
 
-def transfer_weights(source, target):
-    for ind, layer_target in enumerate(target):
-        if isinstance(layer_target, torch.nn.Linear):
-            layer_target.weight.data.copy_(source[str(ind), 'weight'].clone().data)
-            layer_target.bias.data.copy_(source[str(ind), 'bias'].clone().data)
+# def transfer_weights(source, target):
+#     for ind, layer_target in enumerate(target):
+#         if isinstance(layer_target, torch.nn.Linear):
+#             layer_target.weight.data.copy_(source[str(ind), 'weight'].clone().data)
+#             layer_target.bias.data.copy_(source[str(ind), 'bias'].clone().data)
 
 def make_energy_prediction_module(num_inputs, num_outputs, cfg) -> EnergyPredictor:
-    model_save_base_path = cfg.energy_prediction.model_save_base_path
-    model_save_dir = cfg.energy_prediction.model_save_dir
-    metadata = TensorDict({}).load_memmap(get_project_root_path_vscode() + 
-                                        f"{model_save_base_path}/{model_save_dir}/model_metadata")
+    #model_save_base_path = cfg.energy_prediction.model_save_base_path
+    #model_save_dir = cfg.energy_prediction.model_save_dir
+    #metadata = TensorDict({}).load_memmap(get_project_root_path_vscode() + 
+    #                                    f"{model_save_base_path}/{model_save_dir}/model_metadata")
     #params = TensorDict({}).load_memmap(get_project_root_path_vscode() + 
     #                                  f"{model_save_base_path}/{model_save_dir}/model_params")
-    cfg_num_place_cells = metadata["num_place_cells"].item()
-    cfg_num_head_cells = metadata["num_head_cells"].item()
-    cfg_num_energy_heads = metadata["num_energy_heads"].item()
-    cfg_model_num_cells = metadata["num_cells"].item()
-    cfg_num_cat_frames = metadata["num_cat_frames"].item()
+    cfg_num_place_cells = cfg.energy_prediction.num_place_cells
+    cfg_num_head_cells = cfg.energy_prediction.num_head_cells
+    cfg_num_energy_heads = cfg.energy_prediction.num_energy_heads
+    cfg_model_num_cells = cfg.energy_prediction.num_cells
+    cfg_num_cat_frames = 1
     cfg_predict_heading = cfg_num_head_cells > 0
     cfg_predict_place = cfg_num_place_cells > 0
     cfg_predict_state = not (cfg_predict_heading or cfg_predict_place)
-    cfg_from_source = metadata["from_source"]
-    cfg_delta = metadata["delta"]
-    cfg_use_dropout = metadata["use_dropout"].item()
+    cfg_from_source = cfg.energy_prediction.from_source
+    cfg_delta = cfg.energy_prediction.delta
+    cfg_use_dropout = cfg.energy_prediction.use_dropout
 
     predictor_module = EnergyPredictor(in_features_obs = num_inputs, 
                                         in_features_act = num_outputs,
@@ -90,7 +90,6 @@ def make_energy_prediction_module(num_inputs, num_outputs, cfg) -> EnergyPredict
                                        use_dropout = cfg_use_dropout,
                                        )
     
-    predictor_module.eval()
     out_keys = ["integration_prediction"]
     if cfg_predict_heading:
         out_keys.append("head_energy_prediction")

@@ -5,7 +5,7 @@ env:
 
 rb:
   save_base_path: data
-  save_dir: random_buffer_swimmer_v5
+  save_dir: random_buffer_single_swimmer_v5
 
 collector:
   num_envs: 10

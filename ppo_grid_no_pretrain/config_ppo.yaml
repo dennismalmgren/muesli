@@ -37,7 +37,14 @@ loss:
   loss_critic_type: l2
 
 energy_prediction:
-  model_save_base_path: models
-  model_save_dir: previous_state_path_energy_place_head_dropout_swimmer_v5
-
-
+  seed: 100
+#inputs
+  from_source: "current_state" #previous_state, current_state
+  delta: "single" #action, path, delta, none, single
+  use_dropout: True
+#outputs
+  num_place_cells: 256
+  num_head_cells: 256
+  num_energy_heads: 256
+  num_cells: 256
+  predict_state_mse: False

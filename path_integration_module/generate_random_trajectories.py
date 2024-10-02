@@ -39,7 +39,7 @@ def get_project_root_path_vscode():
 def make_env(env_name="FrozenLake-v5", device="cpu"):
     env = GymEnv(env_name, device=device)
     env = TransformedEnv(env)
-    env.append_transform(CatFrames(2, in_keys=["observation"], dim=-1, padding="constant"))
+    #env.append_transform(CatFrames(2, in_keys=["observation"], dim=-1, padding="constant"))
     #env.append_transform(VecNorm(in_keys=["observation"], decay=0.99999, eps=1e-2))
     #env.append_transform(ClipTransform(in_keys=["observation"], low=-10, high=10))
     # env.append_transform(RenameTransform(in_keys=["action"], out_keys=["prev_action"], 
