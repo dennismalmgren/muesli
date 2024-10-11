@@ -139,9 +139,12 @@ def main(cfg: "DictConfig"):  # noqa: F821
     )
 
     check_env_specs(env)
+    groups = list(env.group_map.keys())
+    group0 = groups[0]
+    group1 = groups[1]    
 
     num_iters = 5
-    train_iters = 3500
+    train_iters = 1000
     lr_steps = num_iters * train_iters
     policy_lr = 0.005
     critic_lr = 0.005
@@ -151,6 +154,13 @@ def main(cfg: "DictConfig"):  # noqa: F821
     policy_optimizers = {}
     for group, agents in env.group_map.items():
         policy_group = PolicyModule(1, 2)
+        if group == group1:
+            with torch.no_grad():
+                policy_group.output.bias[0] = 1.0
+        else:
+            with torch.no_grad():
+                policy_group.output.bias[0] = -1.0
+
         policy_modules[group] = policy_group
         policy_reg_group = PolicyModule(1, 2)
         copy_weights(policy_group, policy_reg_group)
@@ -165,7 +175,6 @@ def main(cfg: "DictConfig"):  # noqa: F821
         critic_optimizers[group] = optim.SGD(critic_group.parameters(), lr=critic_lr)
 
     
-    groups = list(env.group_map.keys())
     print(f"Initial policy_modules: {policy_modules}")
     lr_step = 0
     for fix_iter in range(num_iters):
@@ -174,10 +183,9 @@ def main(cfg: "DictConfig"):  # noqa: F821
             
         for train_iter in range(train_iters):
             episodes = []
-            for episode_id in range(128):            
+            for episode_id in range(64):            
                 td = env.reset()
-                group0 = groups[0]
-                group1 = groups[1]
+
                 action0, action0_logprob, action0_logits, action0_probdist = sample_policy(policy_modules[group0], td[group0]['observation'])
                 action1, action1_logprob, action1_logits, action1_probdist = sample_policy(policy_modules[group1], td[group1]['observation'])
                 td[group0]["action"] = action0
@@ -225,12 +233,15 @@ def main(cfg: "DictConfig"):  # noqa: F821
 
             lr_step += 1
             policy0_loss = torch.mean(-action0_logits * advantages0)
+            
+            policy0_loss = torch.mean(-action0_logits * advantages0 / torch.exp(action0_logprob).detach())
             #policy0_loss = torch.mean(torch.exp(action0_logprob) * advantages0)
             policy_optimizers[group0].zero_grad()
             policy0_loss.backward()
             policy_optimizers[group0].step()
 
-            policy1_loss = torch.mean(-action1_logits * advantages1)
+            #policy1_loss = torch.mean(-action1_logits * advantages1)
+            policy1_loss = torch.mean(-action1_logits * advantages1 / torch.exp(action1_logprob).detach())
             #policy1_loss = torch.mean(torch.exp(action1_logprob) * advantages1)
             policy_optimizers[group1].zero_grad()
             policy1_loss.backward()

@@ -96,7 +96,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
         critics[group] = critic_group
 
     num_iters = 5
-    train_iters = 35000
+    train_iters = 1000
     lr_critic = 0.001
     lr_policy = 0.001
     groups = list(env.group_map.keys())
