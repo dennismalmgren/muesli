@@ -54,6 +54,9 @@ class ColonelBlottoParallelEnv(ParallelEnv):
         self.infos = {agent: {} for agent in self.agents}
         return {agent: self.allocations[self.agent_name_mapping(agent)] for agent in self.agents}, self.infos
     
+    def softmax_stable(self, x):
+        return(np.exp(x - np.max(x, axis=-1, keepdims=True)) / np.exp(x - np.max(x, axis=-1, keepdims=True)).sum(axis=-1, keepdims=True))
+
     def step(
         self, actions: dict[AgentID, ActionType]
     ) -> tuple[
@@ -67,9 +70,11 @@ class ColonelBlottoParallelEnv(ParallelEnv):
         for agent, action in actions.items():
             agent_index = self.agent_name_mapping(agent)
             action_sum = np.sum(action).item()
-            if action_sum <= 0.0:
-                action = np.ones_like(action)
-            action = action / np.sum(action) * self.budgets[agent_index]
+            if not np.isclose(action_sum, 1.0):
+                action = self.softmax_stable(action)
+                print("Warning, normalizing input")
+#                action = np.ones_like(action)
+#            action = action / np.sum(action) * self.budgets[agent_index]
             self.allocations[agent_index] = action
 
         # Calculate rewards based on the allocations

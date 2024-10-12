@@ -129,13 +129,25 @@ def regularize_reward_energy(reward, action_i_energy, action_i_reg_energy, actio
     return reward - eta * own_policy_reward + \
                     eta * adv_policy_reward
 
-def sample_policy(policy_module, observation, a_init = None, action_dim=3, steps=10, step_size=0.01):
+def project_onto_simplex(a):
+    """
+    Projects the input 'a' onto the probability simplex (i.e., makes sure the elements sum to 1 and are >= 0).
+    """
+    sorted_a, _ = torch.sort(a, descending=True)
+    cumsum = torch.cumsum(sorted_a, dim=-1) - 1
+    rho = torch.arange(1, len(a) + 1).float().unsqueeze(-1) #note, this should match all dimensions of a.
+    theta = (cumsum / rho).max(dim=-1, keepdim=True)[0]
+    projected = torch.clamp(a - theta, min=0)
+    return projected / projected.sum(dim=-1, keepdim=True)  # Ensure exact sum-to-1 constraint
+
+def sample_policy(policy_module, observation, a_init = None, action_dim=3, steps=10, step_size=0.05):
     if a_init is None:
-        a_init = torch.randn((*observation.shape[:-1], action_dim))  # Assuming zero mean and unit variance
+        a_init = torch.distributions.Dirichlet(torch.ones(3)).sample(observation.shape[:-1])
+#        a_init = torch.randn((*observation.shape[:-1], action_dim))  # Assuming zero mean and unit variance
         # Initialize action from base distribution
     a = a_init.clone()
-    a.requires_grad = True
     for _ in range(steps):
+        a.requires_grad = True
         energy = policy_module(observation, a)
 #        grad_a = torch.autograd.grad(outputs=energy.sum(), inputs=a, create_graph=True)[0]
 
@@ -145,12 +157,15 @@ def sample_policy(policy_module, observation, a_init = None, action_dim=3, steps
         with torch.no_grad():
             a -= (step_size / 2) * a.grad
             a += noise
-            a.grad.zero_()
-    a_unconstrained = a.detach()
-    a_unconstrained_energy = policy_module(observation, a_unconstrained)
-    a_sampled = torch.clamp(a_unconstrained, 0, 1)
-    a_sampled_energy = policy_module(observation, a_sampled)
-    return a_sampled, a_unconstrained, a_sampled_energy
+            a = project_onto_simplex(a)
+
+            #a.grad.zero_()
+
+    a = a.detach()
+    #a_unconstrained_energy = policy_module(observation, a_unconstrained)
+    
+    a_energy = policy_module(observation, a)   
+    return a, a_energy
 
 def copy_weights(source_policy, target_policy):
     target_policy.load_state_dict(source_policy.state_dict())
@@ -167,8 +182,8 @@ def gather_samples(base_env, policy_0, policy_1, n_samples, n_sample_steps):
     #sample_actions_policy_0 = torch.zeros((n_samples, action_dim))
     #sample_actions_policy_1 = torch.zeros((n_samples, action_dim))
     
-    policy_0_action, _, _ = sample_policy(policy_0, observation0, steps=n_sample_steps)
-    policy_1_action, _, _ = sample_policy(policy_1, observation1, steps=n_sample_steps)
+    policy_0_action, _ = sample_policy(policy_0, observation0, steps=n_sample_steps)
+    policy_1_action, _ = sample_policy(policy_1, observation1, steps=n_sample_steps)
     return policy_0_action, policy_1_action
 
 
@@ -179,10 +194,11 @@ def plot_samples(action_samples_policy_0, action_samples_policy_1, iteration):
     def to_barycentric(point):
         # The point should sum to 1, or be normalized
         return point @ vertices
-    action_samples_policy_0[action_samples_policy_0.sum(-1) == 0, :] = 1.0
-    action_samples_policy_1[action_samples_policy_1.sum(-1) == 0, :] = 1.0
-    action_samples_policy_0 = action_samples_policy_0 / action_samples_policy_0.sum(-1, keepdims=True)
-    action_samples_policy_1 = action_samples_policy_1 / action_samples_policy_1.sum(-1, keepdims=True)
+
+#    action_samples_policy_0[action_samples_policy_0.sum(-1) == 0, :] = 1.0
+#    action_samples_policy_1[action_samples_policy_1.sum(-1) == 0, :] = 1.0
+#    action_samples_policy_0 = action_samples_policy_0 / action_samples_policy_0.sum(-1, keepdims=True)
+#    action_samples_policy_1 = action_samples_policy_1 / action_samples_policy_1.sum(-1, keepdims=True)
 
     points_2d_policy_0 = np.array([to_barycentric(p) for p in action_samples_policy_0])
     points_2d_policy_1 = np.array([to_barycentric(p) for p in action_samples_policy_1])
@@ -240,7 +256,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     num_envs_rollout = 64
 
     num_iters = 30
-    train_iters = 1000
+    train_iters = 10000
     lr_steps = num_iters * train_iters
     policy_lr = 0.005
     critic_lr = 0.005
@@ -255,21 +271,21 @@ def main(cfg: "DictConfig"):  # noqa: F821
         ),
     )
     
-    def create_env():
-        base_env = ColonelBlottoParallelEnv(num_players=2, num_battlefields=3)
-        base_env = PettingZooWrapper(base_env, group_map=MarlGroupMapType.ONE_GROUP_PER_AGENT, device=device)
+    # def create_env():
+    #     base_env = ColonelBlottoParallelEnv(num_players=2, num_battlefields=3)
+    #     base_env = PettingZooWrapper(base_env, group_map=MarlGroupMapType.ONE_GROUP_PER_AGENT, device=device)
 
         
-        env = TransformedEnv(
-            base_env,
-            RewardSum(
-                in_keys=base_env.reward_keys,
-                reset_keys=["_reset"] * len(base_env.group_map.keys()),
-            ),
-        )
-        return env
+    #     env = TransformedEnv(
+    #         base_env,
+    #         RewardSum(
+    #             in_keys=base_env.reward_keys,
+    #             reset_keys=["_reset"] * len(base_env.group_map.keys()),
+    #         ),
+    #     )
+    #     return env
     
-    env = ParallelEnv(num_workers=num_envs_rollout, create_env_fn = create_env)
+    # env = ParallelEnv(num_workers=num_envs_rollout, create_env_fn = create_env)
     check_env_specs(env)
 
     
@@ -314,23 +330,23 @@ def main(cfg: "DictConfig"):  # noqa: F821
             
         for train_iter in range(train_iters):
             td = env.reset()
-            action0_sampled, action0_unconstrained, action0_unconstrained_energy = sample_policy(policy_modules[group0], td[group0]['observation'], steps=policy_sample_steps)
-            action1_sampled, action1_unconstrained, action1_unconstrained_energy = sample_policy(policy_modules[group1], td[group1]['observation'], steps=policy_sample_steps)
-            action0_z_sampled, action0_z_unconstrained, action0_z_unconstrained_energy = sample_policy(policy_modules[group0], td[group0]['observation'], steps=policy_sample_steps)
-            action1_z_sampled, action1_z_unconstrained, action1_z_unconstrained_energy = sample_policy(policy_modules[group1], td[group1]['observation'], steps=policy_sample_steps)
+            action0_sampled, action0_energy = sample_policy(policy_modules[group0], td[group0]['observation'], steps=policy_sample_steps)
+            action1_sampled, action1_energy = sample_policy(policy_modules[group1], td[group1]['observation'], steps=policy_sample_steps)
+            action0_z_sampled, action0_z_energy = sample_policy(policy_modules[group0], td[group0]['observation'], steps=policy_sample_steps)
+            action1_z_sampled, action1_z_energy = sample_policy(policy_modules[group1], td[group1]['observation'], steps=policy_sample_steps)
             td[group0]["action"] = action0_sampled
-            td[group0]["action_unconstrained"] = action0_unconstrained
-            td[group0]["action_unconstrained_energy"] = action0_unconstrained_energy
+            #td[group0]["action_unconstrained"] = action0_unconstrained
+            td[group0]["action_energy"] = action0_energy
             td[group0]["z_action"] = action0_z_sampled
-            td[group0]["z_action_unconstrained"] = action0_z_unconstrained
-            td[group0]["z_action_unconstrained_energy"] = action0_z_unconstrained_energy
+            td[group0]["z_action_energy"] = action0_z_energy
+            #td[group0]["z_action_unconstrained_energy"] = action0_z_unconstrained_energy
             
             td[group1]["action"] = action1_sampled
-            td[group1]["action_unconstrained"] = action1_unconstrained
-            td[group1]["action_unconstrained_energy"] = action1_unconstrained_energy
+            td[group1]["action_energy"] = action1_energy
+            #td[group1]["action_unconstrained_energy"] = action1_unconstrained_energy
             td[group1]["z_action"] = action1_z_sampled
-            td[group1]["z_action_unconstrained"] = action1_z_unconstrained
-            td[group1]["z_action_unconstrained_energy"] = action1_z_unconstrained_energy
+            #td[group1]["z_action_unconstrained"] = action1_z_unconstrained
+            td[group1]["z_action_energy"] = action1_z_energy
 
             td = env.step(td)           
             
@@ -345,23 +361,20 @@ def main(cfg: "DictConfig"):  # noqa: F821
             action0_z = td[group0, 'z_action']
             action1_z = td[group1, 'z_action']
             
-            action0_unconstrained = td[group0, 'action_unconstrained']
-            action1_unconstrained = td[group1, 'action_unconstrained']
-            action0_unconstrained_energy = td[group0, 'action_unconstrained_energy']
-            action1_unconstrained_energy = td[group1, 'action_unconstrained_energy']
+            #action0_unconstrained = td[group0, 'action_unconstrained']
+            #action1_unconstrained = td[group1, 'action_unconstrained']
+            action0_energy = td[group0, 'action_energy']
+            action1_energy = td[group1, 'action_energy']
 
             value0 = critics[group0](observations0)
             value1 = critics[group1](observations1)
             qvalue0 = qvals[group0](observations0, action0)
             qvalue1 = qvals[group1](observations1, action1)
-            action0_unconstrained_max = torch.max(action0_unconstrained, dim = 0)[0].squeeze()
-            action1_unconstrained_max = torch.max(action1_unconstrained, dim = 0)[0].squeeze()            
-            action0_unconstrained_energy_max = torch.max(action0_unconstrained_energy, dim = 0)[0].squeeze()
-            action1_unconstrained_energy_max = torch.max(action1_unconstrained_energy, dim = 0)[0].squeeze()
-            action0_unconstrained_min = torch.min(action0_unconstrained, dim = 0)[0].squeeze()
-            action1_unconstrained_min = torch.min(action1_unconstrained, dim = 0)[0].squeeze()
-            action0_unconstrained_energy_min = torch.min(action0_unconstrained_energy, dim = 0)[0].squeeze()
-            action1_unconstrained_energy_min = torch.min(action1_unconstrained_energy, dim = 0)[0].squeeze()
+        
+            action0_energy_max = torch.max(action0_energy, dim = 0)[0].squeeze()
+            action1_energy_max = torch.max(action1_energy, dim = 0)[0].squeeze()
+            action0_energy_min = torch.min(action0_energy, dim = 0)[0].squeeze()
+            action1_energy_min = torch.min(action1_energy, dim = 0)[0].squeeze()
 
             with torch.no_grad():
                 energy0 = policy_modules[group0](observations0, action0)
@@ -408,7 +421,10 @@ def main(cfg: "DictConfig"):  # noqa: F821
 
             #sampled_actions = env.action_spec.sample((64,))
             train_action0 = torch.rand((*observations0.shape[:-1], action_dim))
+            train_action0 = project_onto_simplex(train_action0)
             train_action1 = torch.rand((*observations1.shape[:-1], action_dim))
+            train_action1 = project_onto_simplex(train_action1)
+            
 
             with torch.no_grad():
                 train_qvals0 = qvals[group0](observations0, train_action0)
@@ -431,13 +447,13 @@ def main(cfg: "DictConfig"):  # noqa: F821
             #     g['lr'] = critic_lr * (1.0 - lr_step / lr_steps)      
 
             lr_step += 1
-            policy0_loss = torch.mean(train_energy0 * advantages0) #how do we construct the policy loss?
+            policy0_loss = torch.mean(-train_energy0 * advantages0) #how do we construct the policy loss?
             #policy0_loss = torch.mean(torch.exp(action0_logprob) * advantages0)
             policy_optimizers[group0].zero_grad()
             policy0_loss.backward()
             policy_optimizers[group0].step()
 
-            policy1_loss = torch.mean(train_energy1 * advantages1)
+            policy1_loss = torch.mean(-train_energy1 * advantages1)
             #policy1_loss = torch.mean(torch.exp(action1_logprob) * advantages1)
             policy_optimizers[group1].zero_grad()
             policy1_loss.backward()
@@ -445,10 +461,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
 
             if train_iter % 10 == 0:
                 print(f"Fix iter: {fix_iter}, train iter: {train_iter}, policy_0_loss: {policy0_loss.item()}, policy_1_loss: {policy1_loss.item()}")
-                print(f"Policy 0 unconstrained min: {action0_unconstrained_min}, policy 0 unconstrained max: {action0_unconstrained_max}")
-                print(f"Policy 1 unconstrained min: {action1_unconstrained_min}, policy 1 unconstrained max: {action1_unconstrained_max}")
-                print(f"Policy 0 energy min: {action0_unconstrained_energy_min}, policy 0 energy max: {action0_unconstrained_energy_max}")
-                print(f"Policy 1 energy min: {action1_unconstrained_energy_min}, policy 1 energy max: {action1_unconstrained_energy_max}")                
+                print(f"Policy 0 energy min: {action0_energy_min}, policy 0 energy max: {action0_energy_max}")
+                print(f"Policy 1 energy min: {action1_energy_min}, policy 1 energy max: {action1_energy_max}")                
                 print(f"Mean critic prediction policy 0: {value0.mean()} mean reward: {reward0_game.mean()}, mean regularized reward: {reward0.mean()}")
                 print(f"Mean critic prediction policy 1: {value1.mean()} mean reward: {reward1_game.mean()}, mean regularized reward: {reward1.mean()}")
 
