@@ -129,7 +129,7 @@ def regularize_reward_energy(reward, action_i_energy, action_i_reg_energy, actio
     return reward - eta * own_policy_reward + \
                     eta * adv_policy_reward
 
-def sample_policy(policy_module, observation, a_init = None, action_dim=3, steps=1000, step_size=0.01):
+def sample_policy(policy_module, observation, a_init = None, action_dim=3, steps=10, step_size=0.01):
     if a_init is None:
         a_init = torch.randn((*observation.shape[:-1], action_dim))  # Assuming zero mean and unit variance
         # Initialize action from base distribution
@@ -149,12 +149,13 @@ def sample_policy(policy_module, observation, a_init = None, action_dim=3, steps
     a_unconstrained = a.detach()
     a_unconstrained_energy = policy_module(observation, a_unconstrained)
     a_sampled = torch.clamp(a_unconstrained, 0, 1)
-    return a_sampled, a_unconstrained, a_unconstrained_energy
+    a_sampled_energy = policy_module(observation, a_sampled)
+    return a_sampled, a_unconstrained, a_sampled_energy
 
 def copy_weights(source_policy, target_policy):
     target_policy.load_state_dict(source_policy.state_dict())
 
-def gather_samples(base_env, policy_0, policy_1, n_samples):
+def gather_samples(base_env, policy_0, policy_1, n_samples, n_sample_steps):
     td_policy = base_env.reset()
     observation0 = td_policy['player_0', 'observation']
     observation1 = td_policy['player_1', 'observation']
@@ -166,8 +167,8 @@ def gather_samples(base_env, policy_0, policy_1, n_samples):
     #sample_actions_policy_0 = torch.zeros((n_samples, action_dim))
     #sample_actions_policy_1 = torch.zeros((n_samples, action_dim))
     
-    policy_0_action, _, _ = sample_policy(policy_0, observation0)
-    policy_1_action, _, _ = sample_policy(policy_1, observation1)
+    policy_0_action, _, _ = sample_policy(policy_0, observation0, steps=n_sample_steps)
+    policy_1_action, _, _ = sample_policy(policy_1, observation1, steps=n_sample_steps)
     return policy_0_action, policy_1_action
 
 
@@ -178,6 +179,10 @@ def plot_samples(action_samples_policy_0, action_samples_policy_1, iteration):
     def to_barycentric(point):
         # The point should sum to 1, or be normalized
         return point @ vertices
+    action_samples_policy_0[action_samples_policy_0.sum(-1) == 0, :] = 1.0
+    action_samples_policy_1[action_samples_policy_1.sum(-1) == 0, :] = 1.0
+    action_samples_policy_0 = action_samples_policy_0 / action_samples_policy_0.sum(-1, keepdims=True)
+    action_samples_policy_1 = action_samples_policy_1 / action_samples_policy_1.sum(-1, keepdims=True)
 
     points_2d_policy_0 = np.array([to_barycentric(p) for p in action_samples_policy_0])
     points_2d_policy_1 = np.array([to_barycentric(p) for p in action_samples_policy_1])
@@ -211,7 +216,7 @@ def plot_samples(action_samples_policy_0, action_samples_policy_1, iteration):
     ax[1].set_xlim(-0.1, 1.1)
     ax[1].set_ylim(-0.1, np.sqrt(3)/2 + 0.1)
     ax[1].set_aspect('equal', adjustable='box')
-
+    
     # Scatter plot the points inside the triangle
     ax[0].scatter(points_2d_policy_0[:, 0], points_2d_policy_0[:, 1], color='blue', alpha=0.6)
     ax[1].scatter(points_2d_policy_1[:, 0], points_2d_policy_1[:, 1], color='blue', alpha=0.6)
@@ -232,7 +237,16 @@ def main(cfg: "DictConfig"):  # noqa: F821
     ref_env = ColonelBlottoParallelEnv(num_players=2, num_battlefields=3)
     ref_env = PettingZooWrapper(ref_env, group_map=MarlGroupMapType.ONE_GROUP_PER_AGENT, device=device)
     action_dim = 3
-    
+    num_envs_rollout = 64
+
+    num_iters = 30
+    train_iters = 1000
+    lr_steps = num_iters * train_iters
+    policy_lr = 0.005
+    critic_lr = 0.005
+    policy_sample_steps=10
+    n_samples_per_observation = 20
+
     env = TransformedEnv(
         ref_env,
         RewardSum(
@@ -255,14 +269,9 @@ def main(cfg: "DictConfig"):  # noqa: F821
         )
         return env
     
-    env = ParallelEnv(num_workers=128, create_env_fn = create_env)
+    env = ParallelEnv(num_workers=num_envs_rollout, create_env_fn = create_env)
     check_env_specs(env)
 
-    num_iters = 30
-    train_iters = 10000
-    lr_steps = num_iters * train_iters
-    policy_lr = 0.005
-    critic_lr = 0.005
     
     policy_modules = {}
     policy_reg_modules = {}
@@ -293,7 +302,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     group0 = groups[0]
     group1 = groups[1]
 
-    action_samples_policy_0, action_samples_policy_1 = gather_samples(ref_env, policy_modules[group0], policy_modules[group1], 1000)
+    action_samples_policy_0, action_samples_policy_1 = gather_samples(ref_env, policy_modules[group0], policy_modules[group1], 1000, n_sample_steps=policy_sample_steps)
     action_samples_policy_0 = action_samples_policy_0.detach().numpy()
     action_samples_policy_1 = action_samples_policy_1.detach().numpy()
     plot_samples(action_samples_policy_0, action_samples_policy_1, 0)
@@ -304,18 +313,17 @@ def main(cfg: "DictConfig"):  # noqa: F821
             copy_weights(policy_modules[group], policy_reg_modules[group])
             
         for train_iter in range(train_iters):
-            episodes = []
             td = env.reset()
-            action0_sampled, action0_unconstrained, action0_unconstrained_energy = sample_policy(policy_modules[group0], td[group0]['observation'])
-            action1_sampled, action1_unconstrained, action1_unconstrained_energy = sample_policy(policy_modules[group1], td[group1]['observation'])
-            action0_z_sampled, action0_z_unconstrained, action0_z_unconstrained_energy = sample_policy(policy_modules[group0], td[group0]['observation'])
-            action1_z_sampled, action1_z_unconstrained, action1_z_unconstrained_energy = sample_policy(policy_modules[group1], td[group1]['observation'])
+            action0_sampled, action0_unconstrained, action0_unconstrained_energy = sample_policy(policy_modules[group0], td[group0]['observation'], steps=policy_sample_steps)
+            action1_sampled, action1_unconstrained, action1_unconstrained_energy = sample_policy(policy_modules[group1], td[group1]['observation'], steps=policy_sample_steps)
+            action0_z_sampled, action0_z_unconstrained, action0_z_unconstrained_energy = sample_policy(policy_modules[group0], td[group0]['observation'], steps=policy_sample_steps)
+            action1_z_sampled, action1_z_unconstrained, action1_z_unconstrained_energy = sample_policy(policy_modules[group1], td[group1]['observation'], steps=policy_sample_steps)
             td[group0]["action"] = action0_sampled
             td[group0]["action_unconstrained"] = action0_unconstrained
-            td[group0]["action_unconstrained_energy"] = action0_energy
+            td[group0]["action_unconstrained_energy"] = action0_unconstrained_energy
             td[group0]["z_action"] = action0_z_sampled
             td[group0]["z_action_unconstrained"] = action0_z_unconstrained
-            td[group0]["z_action_unconstrained_energy"] = action0_z_energy
+            td[group0]["z_action_unconstrained_energy"] = action0_z_unconstrained_energy
             
             td[group1]["action"] = action1_sampled
             td[group1]["action_unconstrained"] = action1_unconstrained
@@ -339,15 +347,21 @@ def main(cfg: "DictConfig"):  # noqa: F821
             
             action0_unconstrained = td[group0, 'action_unconstrained']
             action1_unconstrained = td[group1, 'action_unconstrained']
+            action0_unconstrained_energy = td[group0, 'action_unconstrained_energy']
+            action1_unconstrained_energy = td[group1, 'action_unconstrained_energy']
 
             value0 = critics[group0](observations0)
             value1 = critics[group1](observations1)
             qvalue0 = qvals[group0](observations0, action0)
             qvalue1 = qvals[group1](observations1, action1)
             action0_unconstrained_max = torch.max(action0_unconstrained, dim = 0)[0].squeeze()
-            action1_unconstrained_max = torch.max(action1_unconstrained, dim = 0)[0].squeeze()
+            action1_unconstrained_max = torch.max(action1_unconstrained, dim = 0)[0].squeeze()            
+            action0_unconstrained_energy_max = torch.max(action0_unconstrained_energy, dim = 0)[0].squeeze()
+            action1_unconstrained_energy_max = torch.max(action1_unconstrained_energy, dim = 0)[0].squeeze()
             action0_unconstrained_min = torch.min(action0_unconstrained, dim = 0)[0].squeeze()
             action1_unconstrained_min = torch.min(action1_unconstrained, dim = 0)[0].squeeze()
+            action0_unconstrained_energy_min = torch.min(action0_unconstrained_energy, dim = 0)[0].squeeze()
+            action1_unconstrained_energy_min = torch.min(action1_unconstrained_energy, dim = 0)[0].squeeze()
 
             with torch.no_grad():
                 energy0 = policy_modules[group0](observations0, action0)
@@ -386,7 +400,6 @@ def main(cfg: "DictConfig"):  # noqa: F821
 
             #train policies
             #obs_batch_size = observations0.shape[0]
-            n_samples_per_observation = 20
             observation_shape = observations0.shape[1:]
             observation_repeat = torch.ones((len(observation_shape),), dtype=torch.int32)
             
@@ -434,16 +447,18 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 print(f"Fix iter: {fix_iter}, train iter: {train_iter}, policy_0_loss: {policy0_loss.item()}, policy_1_loss: {policy1_loss.item()}")
                 print(f"Policy 0 unconstrained min: {action0_unconstrained_min}, policy 0 unconstrained max: {action0_unconstrained_max}")
                 print(f"Policy 1 unconstrained min: {action1_unconstrained_min}, policy 1 unconstrained max: {action1_unconstrained_max}")
+                print(f"Policy 0 energy min: {action0_unconstrained_energy_min}, policy 0 energy max: {action0_unconstrained_energy_max}")
+                print(f"Policy 1 energy min: {action1_unconstrained_energy_min}, policy 1 energy max: {action1_unconstrained_energy_max}")                
                 print(f"Mean critic prediction policy 0: {value0.mean()} mean reward: {reward0_game.mean()}, mean regularized reward: {reward0.mean()}")
                 print(f"Mean critic prediction policy 1: {value1.mean()} mean reward: {reward1_game.mean()}, mean regularized reward: {reward1.mean()}")
 
             if train_iter % 500 == 0:
-                action_samples_policy_0, action_samples_policy_1 = gather_samples(ref_env, policy_modules[group0], policy_modules[group1], 1000)
+                action_samples_policy_0, action_samples_policy_1 = gather_samples(ref_env, policy_modules[group0], policy_modules[group1], 1000, n_sample_steps=policy_sample_steps)
                 action_samples_policy_0 = action_samples_policy_0.detach().numpy()
                 action_samples_policy_1 = action_samples_policy_1.detach().numpy()
                 plot_samples(action_samples_policy_0, action_samples_policy_1, fix_iter * train_iters + train_iter + 1)
 
-        action_samples_policy_0, action_samples_policy_1 = gather_samples(ref_env, policy_modules[group0], policy_modules[group1], 10000)
+        action_samples_policy_0, action_samples_policy_1 = gather_samples(ref_env, policy_modules[group0], policy_modules[group1], 10000, n_sample_steps=policy_sample_steps)
         action_samples_policy_0 = action_samples_policy_0.detach().numpy()
         action_samples_policy_1 = action_samples_policy_1.detach().numpy()
         plot_samples(action_samples_policy_0, action_samples_policy_1, 100000 * (fix_iter + 1))

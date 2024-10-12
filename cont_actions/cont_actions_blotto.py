@@ -165,23 +165,38 @@ def plot_samples(action_samples_policy_0, action_samples_policy_1, iteration):
     points_2d_policy_1 = np.array([to_barycentric(p) for p in action_samples_policy_1])
     
     # Plot the simplex (triangle)
-    plt.figure(figsize=(6, 6))
-    plt.plot([vertices[0, 0], vertices[1, 0]], [vertices[0, 1], vertices[1, 1]], 'k-', lw=2)
-    plt.plot([vertices[1, 0], vertices[2, 0]], [vertices[1, 1], vertices[2, 1]], 'k-', lw=2)
-    plt.plot([vertices[2, 0], vertices[0, 0]], [vertices[2, 1], vertices[0, 1]], 'k-', lw=2)
+    fig, ax = plt.subplots(1, 2, figsize=(6, 6))
+
+    ax[0].plot([vertices[0, 0], vertices[1, 0]], [vertices[0, 1], vertices[1, 1]], 'k-', lw=2)
+    ax[0].plot([vertices[1, 0], vertices[2, 0]], [vertices[1, 1], vertices[2, 1]], 'k-', lw=2)
+    ax[0].plot([vertices[2, 0], vertices[0, 0]], [vertices[2, 1], vertices[0, 1]], 'k-', lw=2)
     
-    # Scatter plot the points inside the triangle
-    plt.scatter(points_2d_policy_0[:, 0], points_2d_policy_0[:, 1], color='blue', alpha=0.6)
+    ax[1].plot([vertices[0, 0], vertices[1, 0]], [vertices[0, 1], vertices[1, 1]], 'k-', lw=2)
+    ax[1].plot([vertices[1, 0], vertices[2, 0]], [vertices[1, 1], vertices[2, 1]], 'k-', lw=2)
+    ax[1].plot([vertices[2, 0], vertices[0, 0]], [vertices[2, 1], vertices[0, 1]], 'k-', lw=2)
+    
+   
 
     # Annotate the vertices to show actions corresponding to each corner
-    plt.text(vertices[0, 0], vertices[0, 1] - 0.05, 'Action 1', fontsize=12, ha='center')
-    plt.text(vertices[1, 0], vertices[1, 1] - 0.05, 'Action 2', fontsize=12, ha='center')
-    plt.text(vertices[2, 0], vertices[2, 1] + 0.05, 'Action 3', fontsize=12, ha='center')
+    ax[0].text(vertices[0, 0], vertices[0, 1] - 0.05, 'Action 1', fontsize=12, ha='center')
+    ax[0].text(vertices[1, 0], vertices[1, 1] - 0.05, 'Action 2', fontsize=12, ha='center')
+    ax[0].text(vertices[2, 0], vertices[2, 1] + 0.05, 'Action 3', fontsize=12, ha='center')
 
-    plt.xlim(-0.1, 1.1)
-    plt.ylim(-0.1, np.sqrt(3)/2 + 0.1)
-    plt.gca().set_aspect('equal', adjustable='box')
-    #plt.show() 
+    ax[1].text(vertices[0, 0], vertices[0, 1] - 0.05, 'Action 1', fontsize=12, ha='center')
+    ax[1].text(vertices[1, 0], vertices[1, 1] - 0.05, 'Action 2', fontsize=12, ha='center')
+    ax[1].text(vertices[2, 0], vertices[2, 1] + 0.05, 'Action 3', fontsize=12, ha='center')
+
+    ax[0].set_xlim(-0.1, 1.1)
+    ax[0].set_ylim(-0.1, np.sqrt(3)/2 + 0.1)
+    ax[0].set_aspect('equal', adjustable='box')
+
+    ax[1].set_xlim(-0.1, 1.1)
+    ax[1].set_ylim(-0.1, np.sqrt(3)/2 + 0.1)
+    ax[1].set_aspect('equal', adjustable='box')
+
+    # Scatter plot the points inside the triangle
+    ax[0].scatter(points_2d_policy_0[:, 0], points_2d_policy_0[:, 1], color='blue', alpha=0.6)
+    ax[1].scatter(points_2d_policy_1[:, 0], points_2d_policy_1[:, 1], color='blue', alpha=0.6)
     plt.savefig(f'policy_distribution_iter_{iteration}.png')
     plt.close()
     

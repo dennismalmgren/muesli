@@ -15,7 +15,7 @@ class ColonelBlottoParallelEnv(ParallelEnv):
         
         # Assign budgets for each player if not specified
         if budgets is None:
-            self.budgets = np.asarray([10.0] * num_players)
+            self.budgets = np.asarray([1.0] * num_players)
         else:
             self.budgets = np.asarray(budgets)
         
@@ -66,6 +66,9 @@ class ColonelBlottoParallelEnv(ParallelEnv):
         # Store the allocations from all players
         for agent, action in actions.items():
             agent_index = self.agent_name_mapping(agent)
+            action_sum = np.sum(action).item()
+            if action_sum <= 0.0:
+                action = np.ones_like(action)
             action = action / np.sum(action) * self.budgets[agent_index]
             self.allocations[agent_index] = action
 
@@ -103,7 +106,7 @@ class ColonelBlottoParallelEnv(ParallelEnv):
                     self.rewards[f"player_{i}"] += self.values[i, j]
                 else:
                     self.rewards[f"player_{i}"] += 0
-                self.rewards[f"player_{i}"] -= 1.5 #makes it zero-sum.
+                self.rewards[f"player_{i}"] -= 0.5 #makes it zero-sum.
                 
 
     def render(self) -> None | np.ndarray | str | list:
