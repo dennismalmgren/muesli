@@ -100,7 +100,7 @@ def regularize_reward_energy(reward, action_i_energy, action_i_reg_energy, actio
 #     log_probs = dist.log_prob(action)
 #     return log_probs
 
-def sample_policy(policy_module, observation, a_init = None, action_dim=3, steps=10, step_size=0.01):
+def sample_policy(policy_module, observation, a_init = None, action_dim=3, steps=20, step_size=0.01):
     if a_init is None:
         a_init = torch.randn((*observation.shape[:-1], action_dim))  # Assuming zero mean and unit variance
         # Initialize action from base distribution

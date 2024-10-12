@@ -103,6 +103,8 @@ class ColonelBlottoParallelEnv(ParallelEnv):
                     self.rewards[f"player_{i}"] += self.values[i, j]
                 else:
                     self.rewards[f"player_{i}"] += 0
+                self.rewards[f"player_{i}"] -= 1.5 #makes it zero-sum.
+                
 
     def render(self) -> None | np.ndarray | str | list:
         print(f"Allocations:\n {self.allocations}")
