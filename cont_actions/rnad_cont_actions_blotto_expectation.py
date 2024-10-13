@@ -189,12 +189,12 @@ def gather_samples(base_env, policy_0, policy_1, n_samples, n_sample_steps):
     #sample_actions_policy_0 = torch.zeros((n_samples, action_dim))
     #sample_actions_policy_1 = torch.zeros((n_samples, action_dim))
     
-    policy_0_action, _ = sample_policy(policy_0, observation0, steps=n_sample_steps)
-    policy_1_action, _ = sample_policy(policy_1, observation1, steps=n_sample_steps)
-    return policy_0_action, policy_1_action
+    policy_0_action, policy_0_energy = sample_policy(policy_0, observation0, steps=n_sample_steps)
+    policy_1_action, policy_1_energy = sample_policy(policy_1, observation1, steps=n_sample_steps)
+    return policy_0_action, policy_1_action, policy_0_energy, policy_1_energy
 
 
-def plot_samples(action_samples_policy_0, action_samples_policy_1, iteration):
+def plot_samples(action_samples_policy_0, action_samples_policy_1, policy_0_energy, policy_1_energy, iteration):
     #tbd
     vertices = np.array([[0, 0], [1, 0], [0.5, np.sqrt(3)/2]])
 
@@ -209,6 +209,8 @@ def plot_samples(action_samples_policy_0, action_samples_policy_1, iteration):
 
     points_2d_policy_0 = np.array([to_barycentric(p) for p in action_samples_policy_0])
     points_2d_policy_1 = np.array([to_barycentric(p) for p in action_samples_policy_1])
+    norm_policy_0_energy = (policy_0_energy - (-100.0)) / (200.0)
+    norm_policy_1_energy = (policy_1_energy - (-100.0)) / (200.0)
     
     # Plot the simplex (triangle)
     fig, ax = plt.subplots(1, 2, figsize=(6, 6))
@@ -241,8 +243,8 @@ def plot_samples(action_samples_policy_0, action_samples_policy_1, iteration):
     ax[1].set_aspect('equal', adjustable='box')
     
     # Scatter plot the points inside the triangle
-    ax[0].scatter(points_2d_policy_0[:, 0], points_2d_policy_0[:, 1], color='blue', alpha=0.6)
-    ax[1].scatter(points_2d_policy_1[:, 0], points_2d_policy_1[:, 1], color='blue', alpha=0.6)
+    ax[0].scatter(points_2d_policy_0[:, 0], points_2d_policy_0[:, 1], c=norm_policy_0_energy, cmap='coolwarm', alpha=0.8)
+    ax[1].scatter(points_2d_policy_1[:, 0], points_2d_policy_1[:, 1], c=norm_policy_1_energy, cmap='coolwarm', alpha=0.8)
     plt.savefig(f'policy_distribution_iter_{iteration}.png')
     plt.close()
 
@@ -325,10 +327,12 @@ def main(cfg: "DictConfig"):  # noqa: F821
     group0 = groups[0]
     group1 = groups[1]
 
-    action_samples_policy_0, action_samples_policy_1 = gather_samples(ref_env, policy_modules[group0], policy_modules[group1], 1000, n_sample_steps=policy_sample_steps)
+    action_samples_policy_0, action_samples_policy_1, policy_0_energy, policy_1_energy = gather_samples(ref_env, policy_modules[group0], policy_modules[group1], 1000, n_sample_steps=policy_sample_steps)
     action_samples_policy_0 = action_samples_policy_0.detach().numpy()
     action_samples_policy_1 = action_samples_policy_1.detach().numpy()
-    plot_samples(action_samples_policy_0, action_samples_policy_1, 0)
+    policy_0_energy = policy_0_energy.detach().numpy()
+    policy_1_energy = policy_1_energy.detach().numpy()
+    plot_samples(action_samples_policy_0, action_samples_policy_1, policy_0_energy, policy_1_energy, 0)
 
     lr_step = 0
     for fix_iter in range(num_iters):
@@ -454,13 +458,13 @@ def main(cfg: "DictConfig"):  # noqa: F821
             #     g['lr'] = critic_lr * (1.0 - lr_step / lr_steps)      
 
             lr_step += 1
-            policy0_loss = torch.mean(-train_energy0 * advantages0) #how do we construct the policy loss?
+            policy0_loss = torch.mean(train_energy0 * advantages0) #how do we construct the policy loss?
             #policy0_loss = torch.mean(torch.exp(action0_logprob) * advantages0)
             policy_optimizers[group0].zero_grad()
             policy0_loss.backward()
             policy_optimizers[group0].step()
 
-            policy1_loss = torch.mean(-train_energy1 * advantages1)
+            policy1_loss = torch.mean(train_energy1 * advantages1)
             #policy1_loss = torch.mean(torch.exp(action1_logprob) * advantages1)
             policy_optimizers[group1].zero_grad()
             policy1_loss.backward()
@@ -474,15 +478,20 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 print(f"Mean critic prediction policy 1: {value1.mean()} mean reward: {reward1_game.mean()}, mean regularized reward: {reward1.mean()}")
 
             if train_iter % 500 == 0:
-                action_samples_policy_0, action_samples_policy_1 = gather_samples(ref_env, policy_modules[group0], policy_modules[group1], 1000, n_sample_steps=policy_sample_steps)
+                action_samples_policy_0, action_samples_policy_1, policy_0_energy, policy_1_energy = gather_samples(ref_env, policy_modules[group0], policy_modules[group1], 1000, n_sample_steps=policy_sample_steps)
                 action_samples_policy_0 = action_samples_policy_0.detach().numpy()
                 action_samples_policy_1 = action_samples_policy_1.detach().numpy()
-                plot_samples(action_samples_policy_0, action_samples_policy_1, fix_iter * train_iters + train_iter + 1)
+                policy_0_energy = policy_0_energy.detach().numpy()
+                policy_1_energy = policy_1_energy.detach().numpy()
+                plot_samples(action_samples_policy_0, action_samples_policy_1, policy_0_energy, policy_1_energy, fix_iter * train_iters + train_iter + 1)
 
-        action_samples_policy_0, action_samples_policy_1 = gather_samples(ref_env, policy_modules[group0], policy_modules[group1], 10000, n_sample_steps=policy_sample_steps)
-        action_samples_policy_0 = action_samples_policy_0.detach().numpy()
-        action_samples_policy_1 = action_samples_policy_1.detach().numpy()
-        plot_samples(action_samples_policy_0, action_samples_policy_1, 100000 * (fix_iter + 1))
+                action_samples_policy_0, action_samples_policy_1, policy_0_energy, policy_1_energy = gather_samples(ref_env, policy_modules[group0], policy_modules[group1], 1000, n_sample_steps=policy_sample_steps)
+                action_samples_policy_0 = action_samples_policy_0.detach().numpy()
+                action_samples_policy_1 = action_samples_policy_1.detach().numpy()
+                policy_0_energy = policy_0_energy.detach().numpy()
+                policy_1_energy = policy_1_energy.detach().numpy()
+                plot_samples(action_samples_policy_0, action_samples_policy_1, policy_0_energy, policy_1_energy, 100000 * (fix_iter + 1))
+
         print('Ok')
 
 if __name__ == "__main__":
