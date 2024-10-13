@@ -135,10 +135,17 @@ def project_onto_simplex(a):
     """
     sorted_a, _ = torch.sort(a, descending=True)
     cumsum = torch.cumsum(sorted_a, dim=-1) - 1
-    rho = torch.arange(1, len(a) + 1).float().unsqueeze(-1) #note, this should match all dimensions of a.
+    rho = torch.arange(1, len(a) + 1).float()
+    delta_dims = a.dim() - rho.dim()
+    for _ in range(delta_dims):
+        rho = rho.unsqueeze(-1) #note, this should match all dimensions of a.
     theta = (cumsum / rho).max(dim=-1, keepdim=True)[0]
-    projected = torch.clamp(a - theta, min=0)
-    return projected / projected.sum(dim=-1, keepdim=True)  # Ensure exact sum-to-1 constraint
+    epsilon = 1e-10
+    projected = torch.clamp(a - theta, min=epsilon)
+    projected_sum = projected.sum(-1, keepdim=True)
+    #projected_sum[projected_sum < epsilon] = epsilon
+
+    return projected / projected_sum  # Ensure exact sum-to-1 constraint
 
 def sample_policy(policy_module, observation, a_init = None, action_dim=3, steps=10, step_size=0.05):
     if a_init is None:
@@ -253,14 +260,14 @@ def main(cfg: "DictConfig"):  # noqa: F821
     ref_env = ColonelBlottoParallelEnv(num_players=2, num_battlefields=3)
     ref_env = PettingZooWrapper(ref_env, group_map=MarlGroupMapType.ONE_GROUP_PER_AGENT, device=device)
     action_dim = 3
-    num_envs_rollout = 64
+    num_envs_rollout = 128
 
     num_iters = 30
-    train_iters = 10000
+    train_iters = 50000
     lr_steps = num_iters * train_iters
     policy_lr = 0.005
     critic_lr = 0.005
-    policy_sample_steps=10
+    policy_sample_steps=20
     n_samples_per_observation = 20
 
     env = TransformedEnv(
@@ -271,21 +278,21 @@ def main(cfg: "DictConfig"):  # noqa: F821
         ),
     )
     
-    # def create_env():
-    #     base_env = ColonelBlottoParallelEnv(num_players=2, num_battlefields=3)
-    #     base_env = PettingZooWrapper(base_env, group_map=MarlGroupMapType.ONE_GROUP_PER_AGENT, device=device)
+    def create_env():
+        base_env = ColonelBlottoParallelEnv(num_players=2, num_battlefields=3)
+        base_env = PettingZooWrapper(base_env, group_map=MarlGroupMapType.ONE_GROUP_PER_AGENT, device=device)
 
         
-    #     env = TransformedEnv(
-    #         base_env,
-    #         RewardSum(
-    #             in_keys=base_env.reward_keys,
-    #             reset_keys=["_reset"] * len(base_env.group_map.keys()),
-    #         ),
-    #     )
-    #     return env
+        env = TransformedEnv(
+            base_env,
+            RewardSum(
+                in_keys=base_env.reward_keys,
+                reset_keys=["_reset"] * len(base_env.group_map.keys()),
+            ),
+        )
+        return env
     
-    # env = ParallelEnv(num_workers=num_envs_rollout, create_env_fn = create_env)
+    env = ParallelEnv(num_workers=num_envs_rollout, create_env_fn = create_env)
     check_env_specs(env)
 
     
