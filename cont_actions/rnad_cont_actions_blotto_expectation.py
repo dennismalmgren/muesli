@@ -113,7 +113,7 @@ class PolicyModule(nn.Module):
         hidden = F.elu(self.embed(input))
         hidden = F.elu(self.hidden(hidden))
         output = self.output(hidden)
-        output = torch.clamp(output, -100.0, 100.0)
+        output = torch.clamp(output, -10.0, 10.0)
         return output
 
 def regularize_reward(reward, action_i_logprob, action_i_reg_logprob, action_adv_logprob, action_adv_reg_logprob):
@@ -209,8 +209,8 @@ def plot_samples(action_samples_policy_0, action_samples_policy_1, policy_0_ener
 
     points_2d_policy_0 = np.array([to_barycentric(p) for p in action_samples_policy_0])
     points_2d_policy_1 = np.array([to_barycentric(p) for p in action_samples_policy_1])
-    norm_policy_0_energy = (policy_0_energy - (-100.0)) / (200.0)
-    norm_policy_1_energy = (policy_1_energy - (-100.0)) / (200.0)
+    norm_policy_0_energy = (policy_0_energy - (-10.0)) / (20.0)
+    norm_policy_1_energy = (policy_1_energy - (-10.0)) / (20.0)
     
     # Plot the simplex (triangle)
     fig, ax = plt.subplots(1, 2, figsize=(6, 6))
@@ -262,10 +262,10 @@ def main(cfg: "DictConfig"):  # noqa: F821
     ref_env = ColonelBlottoParallelEnv(num_players=2, num_battlefields=3)
     ref_env = PettingZooWrapper(ref_env, group_map=MarlGroupMapType.ONE_GROUP_PER_AGENT, device=device)
     action_dim = 3
-    num_envs_rollout = 128
+    num_envs_rollout = 1
 
     num_iters = 30
-    train_iters = 50000
+    train_iters = 5000
     lr_steps = num_iters * train_iters
     policy_lr = 0.005
     critic_lr = 0.005
@@ -280,21 +280,22 @@ def main(cfg: "DictConfig"):  # noqa: F821
         ),
     )
     
-    def create_env():
-        base_env = ColonelBlottoParallelEnv(num_players=2, num_battlefields=3)
-        base_env = PettingZooWrapper(base_env, group_map=MarlGroupMapType.ONE_GROUP_PER_AGENT, device=device)
+    if num_envs_rollout > 1:
+        def create_env():
+            base_env = ColonelBlottoParallelEnv(num_players=2, num_battlefields=3)
+            base_env = PettingZooWrapper(base_env, group_map=MarlGroupMapType.ONE_GROUP_PER_AGENT, device=device)
 
+            
+            env = TransformedEnv(
+                base_env,
+                RewardSum(
+                    in_keys=base_env.reward_keys,
+                    reset_keys=["_reset"] * len(base_env.group_map.keys()),
+                ),
+            )
+            return env
         
-        env = TransformedEnv(
-            base_env,
-            RewardSum(
-                in_keys=base_env.reward_keys,
-                reset_keys=["_reset"] * len(base_env.group_map.keys()),
-            ),
-        )
-        return env
-    
-    env = ParallelEnv(num_workers=num_envs_rollout, create_env_fn = create_env)
+        env = ParallelEnv(num_workers=num_envs_rollout, create_env_fn = create_env)
     check_env_specs(env)
 
     
@@ -431,10 +432,13 @@ def main(cfg: "DictConfig"):  # noqa: F821
             observations1 = observations1.repeat((n_samples_per_observation, *observation_repeat))
 
             #sampled_actions = env.action_spec.sample((64,))
-            train_action0 = torch.rand((*observations0.shape[:-1], action_dim))
-            train_action0 = project_onto_simplex(train_action0)
-            train_action1 = torch.rand((*observations1.shape[:-1], action_dim))
-            train_action1 = project_onto_simplex(train_action1)
+            train_action0 = torch.distributions.Dirichlet(torch.ones(action_dim)).sample((*observations0.shape[:-1],))
+            train_action1 = torch.distributions.Dirichlet(torch.ones(action_dim)).sample((*observations1.shape[:-1],))
+
+            #train_action0 = torch.rand((*observations0.shape[:-1], action_dim))
+            #train_action0 = project_onto_simplex(train_action0)
+            #train_action1 = torch.rand((*observations1.shape[:-1], action_dim))
+            #train_action1 = project_onto_simplex(train_action1)
             
 
             with torch.no_grad():
@@ -458,13 +462,22 @@ def main(cfg: "DictConfig"):  # noqa: F821
             #     g['lr'] = critic_lr * (1.0 - lr_step / lr_steps)      
 
             lr_step += 1
-            policy0_loss = torch.mean(train_energy0 * advantages0) #how do we construct the policy loss?
+            with torch.no_grad():
+                indicator_decrease = (train_energy0 > -10.0)
+                indicator_increase = (train_energy0 < 10.0)
+                negative_advantages = torch.clip(advantages0, max=0.0)
+                positive_advantages = torch.clip(advantages0, min=0.0)
+                indicator_advantages = indicator_decrease * positive_advantages + indicator_increase * negative_advantages
+
+            #0.5 is due to importance weight of uniform sampling from 3-d simplex
+            policy0_loss = 0.5 * torch.mean(train_energy0 * indicator_advantages) #how do we construct the policy loss?
             #policy0_loss = torch.mean(torch.exp(action0_logprob) * advantages0)
             policy_optimizers[group0].zero_grad()
             policy0_loss.backward()
             policy_optimizers[group0].step()
+            #0.5 is due to importance weight of uniform sampling from 3-d simplex
 
-            policy1_loss = torch.mean(train_energy1 * advantages1)
+            policy1_loss = 0.5 * torch.mean(train_energy1 * advantages1)
             #policy1_loss = torch.mean(torch.exp(action1_logprob) * advantages1)
             policy_optimizers[group1].zero_grad()
             policy1_loss.backward()
