@@ -285,11 +285,11 @@ def main(cfg: "DictConfig"):  # noqa: F821
     device = torch.device("cpu")
     #device = torch.device("cpu")
     action_dim = 3
-    num_envs_rollout = 12
+    num_envs_rollout = 1000
     min_energy = -10.0
     max_energy = 10.0
     num_iters = 30
-    train_iters = 100000
+    train_iters = 10000
     lr_steps = num_iters * train_iters
     policy_lr = 3e-4
     critic_lr = 3e-3
