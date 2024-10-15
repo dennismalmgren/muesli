@@ -13,14 +13,16 @@ from torchrl.data.tensor_specs import (
 )
 from torchrl.envs.common import EnvBase
 from torchrl.envs.utils import MarlGroupMapType
+from tensordict.utils import NestedKey
 
 class ColonelBlottoParallelEnv(EnvBase):
     batch_locked: bool = False
 
     def __init__(self, *, num_players=2, num_battlefields=5, 
+                 batch_size=None,
                  budgets=None, values=None,
                  device=None):
-        super().__init__(device=device)
+        super().__init__(device=device, batch_size=batch_size)
         self.num_players = num_players
         self.num_battlefields = num_battlefields
         self.agent_names: List[str] = ["player0", "player1"]
@@ -36,52 +38,92 @@ class ColonelBlottoParallelEnv(EnvBase):
         else:
             self.budgets = budgets
         
-        self.action_spec: Bounded = Bounded(low=0.0, high=1.0, shape=(num_battlefields,), device=device)
-
-        self.full_observation_spec: Composite = Composite(
-            observation=Unbounded(shape=(1,), dtype=torch.float32, device=device)
-        )
+        action_spec = Composite(device=self.device, shape=self.batch_size)
+        observation_spec = Composite(device=self.device, shape=self.batch_size)
+        reward_spec = Composite(device=self.device, shape=self.batch_size)
+        done_spec = Composite(device=self.device, shape=self.batch_size)
+        for group in self.group_map.keys():
+            group_action_spec = torch.stack([Composite({"action": Bounded(low=0.0, high=1.0, shape=(*self.batch_size, num_battlefields,), device=device)})], dim=0)
+            group_observation_spec = torch.stack([Composite({"observation": Unbounded(shape=(*self.batch_size, 1, ), dtype=torch.float32, device=device)})], dim=0)
+            group_reward_spec = torch.stack([Composite({"reward": Unbounded(shape=(*self.batch_size, 1, ), device=device)})], dim=0)
+            action_spec[group] = group_action_spec
+            observation_spec[group] = group_observation_spec
+            reward_spec[group] = group_reward_spec
         
-        self.state_spec: Unbounded = self.observation_spec.clone()
+            done_spec[group] = Composite(
+                {
+                    "done": Categorical(
+                        n=2,
+                        shape=torch.Size((*self.batch_size, 1, )),
+                        dtype=torch.bool,
+                        device=self.device,
+                    ),
+                    "terminated": Categorical(
+                        n=2,
+                        shape=torch.Size((*self.batch_size, 1, )),
+                        dtype=torch.bool,
+                        device=self.device,
+                    ),
+                    "truncated": Categorical(
+                        n=2,
+                        shape=torch.Size((*self.batch_size, 1, )),
+                        dtype=torch.bool,
+                        device=self.device,
+                    ),
+                },)
+        self.action_spec = action_spec
+        self.observation_spec = observation_spec
+        self.reward_spec = reward_spec
+        self.done_spec = done_spec
+        self.state_spec = self.observation_spec.clone()
 
-        self.reward_spec: Unbounded = Composite(
-            {
-                ("player0", "reward"): Unbounded(shape=(1,), device=device),
-                ("player1", "reward"): Unbounded(shape=(1,), device=device)
-            },
-            device=device
-        )
-
-        self.full_done_spec: Categorical = Composite(
-            done=Categorical(2, shape=(1,), dtype=torch.bool, device=device),
-            device=device,
-        )
-        self.full_done_spec["terminated"] = self.full_done_spec["done"].clone()
-        self.full_done_spec["truncated"] = self.full_done_spec["done"].clone()
         # Assign values for each battlefield if not specified
         if values is None:
-            self.values = torch.ones((num_players, num_battlefields))
+            self.values = torch.ones((*self.batch_size, num_players, num_battlefields))
         else:
             self.values = values
-
+    # Reward spec
+    @property
+    def reward_keys(self) -> List[NestedKey]:
+        return [("player0", "reward"), ("player1", "reward")]
+    
+    @property
+    def action_keys(self) -> List[NestedKey]:
+        return [("player0", "action"), ("player1", "action")]
+    
+    @property
+    def done_keys(self) -> List[NestedKey]:
+        return [("player0", "done"), ("player1", "done"),
+                ("player0", "terminated"), ("player1", "terminated"),
+                ("player0", "truncated"), ("player1", "truncated"),]
+    
     def _reset(self, reset_td: TensorDict) -> TensorDict:
         shape = reset_td.shape if reset_td is not None else ()
         state = self.state_spec.zero(shape)
-        return state.update(self.full_done_spec.zero(shape))
+        reset_result = state.update(self.full_done_spec.zero(shape))
+        return reset_result
     
     def _step(self, state: TensorDict) -> TensorDict:
-        action = state["action"]
-        the_state = state["state"]
-        reward0 = torch.zeros_like(action)
-        reward1 = torch.zeros_like(action)
-        state = TensorDict(
-            {
-                ("player0", "reward"): reward0.float(),
-                ("player1", "reward"): reward1.float(),
-            },
-            batch_size = the_state.batch_size
-        )
-        return state
+        result_td = TensorDict({"player0": TensorDict({}),
+                                "player1": TensorDict({}),},
+                                batch_size=state.batch_size)
+        
+        action0 = state['player0', 'action']
+        action1 = state['player1', 'action']
+        allocations = torch.cat((action0, action1), dim=-2)
+
+        rewards = self._calculate_rewards(allocations)
+        result_td['player0', 'reward'] = rewards[:, 0].unsqueeze(-1)
+        result_td['player1', 'reward'] = rewards[:, 1].unsqueeze(-1)
+        result_td['player0', 'terminated'] = torch.ones_like(state['player0', 'terminated']).bool()
+        result_td['player1', 'terminated'] = torch.ones_like(state['player1', 'terminated']).bool()
+        result_td['player0', 'done'] = torch.ones_like(state['player0', 'done']).bool()
+        result_td['player1', 'done'] = torch.ones_like(state['player1', 'done']).bool()
+        result_td['player0', 'truncated'] = torch.zeros_like(state['player0', 'truncated']).bool()
+        result_td['player1', 'truncated'] = torch.zeros_like(state['player1', 'truncated']).bool()
+        result_td['player0', 'observation'] = state['player0', 'observation'].clone()
+        result_td['player1', 'observation'] = state['player1', 'observation'].clone()
+        return result_td
     
     def _set_seed(self, seed: int | None):
         ...
@@ -133,22 +175,27 @@ class ColonelBlottoParallelEnv(EnvBase):
     #             self.rewards[f"player_{i}"] += self.values[i, j] * win_probabilities[i]
 
     def _calculate_rewards(self, allocations):
-        rewards = {agent: np.zeros(self.batch_size) for agent in self.agents}
+        batch_size = allocations.shape[0]
+        #allocations are batch_size x agent_id x battlefield
+        rewards = torch.zeros((batch_size, self.num_players, 1), device=allocations.device)
 
         for j in range(self.num_battlefields):
             battlefield_allocations = allocations[:, :, j]
 
-            max_allocations = np.max(battlefield_allocations, axis=0)
-            winners = battlefield_allocations == max_allocations
-            tie_breakers = np.array([
-                np.random.choice(np.flatnonzero(winners[:, b])) if np.sum(winners[:, b]) > 1 else np.argmax(winners[:, b])
-                for b in range(self.batch_size)
-            ])
+            max_allocations = torch.max(battlefield_allocations, dim=-1)[0]
+            winners = battlefield_allocations == max_allocations.unsqueeze(1) #shape: (batch_size, num_players)
+            unique_winners = torch.argmax(winners.float(), dim=1)  # Shape: (batch_size,), index of the winner
+
+            num_winners_per_batch = torch.sum(winners, dim=1)  # Count number of winners per batch
+            unique_winner_mask = num_winners_per_batch == 1  # Shape: (batch_size,), True where unique winner
+            #only works for 2-player games
+            tie_winners = torch.multinomial(torch.ones((batch_size, 2), device=allocations.device), 1).squeeze(-1)
+            final_winners = torch.where(unique_winner_mask, unique_winners, tie_winners)
 
             for i in range(self.num_players):
-                won_mask = tie_breakers == i
-                rewards[f"player_{i}"] += won_mask * self.values[i, j]
-                rewards[f"player_{i}"] -= 0.5 #makes it zero-sum.
+                won_mask = final_winners == i
+                rewards[:, i, 0] += won_mask * self.values[i, j]
+                rewards[:, i, 0] -= 0.5
         return rewards
     
 

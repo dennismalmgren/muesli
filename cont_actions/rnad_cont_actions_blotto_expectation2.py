@@ -184,38 +184,39 @@ def gather_qval_samples(base_env,
                    qval_module_0, qval_module_1, 
                    action_dim=1,
                    n_samples=1000):
-    td_policy = base_env.reset()
-    observation0 = td_policy['player_0', 'observation']
-    observation1 = td_policy['player_1', 'observation']
-    observation_shape = observation0.shape[1:]
-    observation_repeat = torch.ones((len(observation_shape),), dtype=torch.int32, device=observation0.device)
+    reset_td = TensorDict({
+        "player0": TensorDict({},
+                              batch_size=(n_samples,)),
+        "player1": TensorDict({},
+                              batch_size=(n_samples,))
+
+    },
+                          batch_size=(n_samples,),
+                          device=base_env.device)
+    td_qval = base_env.reset(reset_td)
     
-    observation0 = observation0.repeat((n_samples, *observation_repeat))
-    observation1 = observation1.repeat((n_samples, *observation_repeat))
-    sample_action = torch.distributions.Dirichlet(torch.ones(action_dim)).sample((*observation0.shape[:-1],)).to(observation0.device)
-    qval_0 = qval_module_0(observation0, sample_action)
-    qval_1 = qval_module_1(observation1, sample_action)
+    sample_action = torch.distributions.Dirichlet(torch.ones(action_dim)).sample((n_samples, 1,)).to(reset_td.device)
+    qval_0 = qval_module_0(td_qval["player0", "observation"], sample_action)
+    qval_1 = qval_module_1(td_qval["player1", "observation"], sample_action)
 
     return qval_0, qval_1, sample_action
 
 def gather_samples(base_env, 
                    policy_0, policy_1, 
                    n_samples, n_sample_steps):
-    reset_td = TensorDict({},
-                          batch_size=(n_samples,))
+    reset_td = TensorDict({
+        "player0": TensorDict({},
+                              batch_size=(n_samples,)),
+        "player1": TensorDict({},
+                              batch_size=(n_samples,))
+
+    },
+                          batch_size=(n_samples,),
+                          device=base_env.device)
     td_policy = base_env.reset(reset_td)
-    observation0 = td_policy['player_0', 'observation']
-    observation1 = td_policy['player_1', 'observation']
-    observation_shape = observation0.shape[1:]
-    observation_repeat = torch.ones((len(observation_shape),), dtype=torch.int32)
-    
-    observation0 = observation0.repeat((n_samples, *observation_repeat))
-    observation1 = observation1.repeat((n_samples, *observation_repeat))
-    #sample_actions_policy_0 = torch.zeros((n_samples, action_dim))
-    #sample_actions_policy_1 = torch.zeros((n_samples, action_dim))
-    
-    policy_0_action, policy_0_energy = sample_policy(policy_0, observation0, steps=n_sample_steps)
-    policy_1_action, policy_1_energy = sample_policy(policy_1, observation1, steps=n_sample_steps)
+
+    policy_0_action, policy_0_energy = sample_policy(policy_0, td_policy["player0", "observation"], steps=n_sample_steps)
+    policy_1_action, policy_1_energy = sample_policy(policy_1, td_policy["player1", "observation"], steps=n_sample_steps)
     return policy_0_action, policy_1_action, policy_0_energy, policy_1_energy
 
 
@@ -234,13 +235,14 @@ def plot_samples(action_samples_policy_0, action_samples_policy_1,
 #    action_samples_policy_1[action_samples_policy_1.sum(-1) == 0, :] = 1.0
 #    action_samples_policy_0 = action_samples_policy_0 / action_samples_policy_0.sum(-1, keepdims=True)
 #    action_samples_policy_1 = action_samples_policy_1 / action_samples_policy_1.sum(-1, keepdims=True)
-    points_2d_qval = np.array([to_barycentric(p) for p in sample_action])
+    points_2d_qval = np.array([to_barycentric(p) for p in sample_action]).squeeze()
 
-    points_2d_policy_0 = np.array([to_barycentric(p) for p in action_samples_policy_0])
-    points_2d_policy_1 = np.array([to_barycentric(p) for p in action_samples_policy_1])
-    norm_policy_0_energy = (policy_0_energy - min_energy) / (max_energy - min_energy)
-    norm_policy_1_energy = (policy_1_energy - min_energy) / (max_energy - min_energy)
-    
+    points_2d_policy_0 = np.array([to_barycentric(p) for p in action_samples_policy_0]).squeeze()
+    points_2d_policy_1 = np.array([to_barycentric(p) for p in action_samples_policy_1]).squeeze()
+    norm_policy_0_energy = (policy_0_energy.squeeze() - min_energy) / (max_energy - min_energy)
+    norm_policy_1_energy = (policy_1_energy.squeeze() - min_energy) / (max_energy - min_energy)
+    qval_0 = qval_0.squeeze()
+    qval_1 = qval_1.squeeze()
     # Plot the simplex (triangle)
     fig, ax = plt.subplots(2, 2, figsize=(6, 6))
     for i in range(2):
@@ -263,7 +265,11 @@ def plot_samples(action_samples_policy_0, action_samples_policy_1,
     ax[0, 1].scatter(points_2d_policy_1[:, 0], points_2d_policy_1[:, 1], c=norm_policy_1_energy, cmap='coolwarm', alpha=0.8)
     ax[1, 0].scatter(points_2d_qval[:, 0], points_2d_qval[:, 1], c=qval_0, cmap='coolwarm', alpha=0.8)
     ax[1, 1].scatter(points_2d_qval[:, 0], points_2d_qval[:, 1], c=qval_1, cmap='coolwarm', alpha=0.8)
-
+    # ax[0, 0].legend()
+    # ax[0, 1].legend()
+    # ax[1, 0].legend()
+    # ax[1, 1].legend()
+    
     plt.savefig(f'policy_distribution_iter_{iteration}.png')
     plt.close()
 
@@ -279,8 +285,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     device = torch.device("cpu")
     #device = torch.device("cpu")
     action_dim = 3
-    num_envs_rollout = 1
-    env_batch_size = 128
+    num_envs_rollout = 12
     min_energy = -10.0
     max_energy = 10.0
     num_iters = 30
@@ -291,14 +296,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
     policy_sample_steps = 40
     n_samples_per_observation = 10
 
-    ref_env = ColonelBlottoParallelEnv(num_players=2, num_battlefields=3)
-    env = TransformedEnv(
-        ref_env,
-        RewardSum(
-            in_keys=ref_env.reward_keys,
-            reset_keys=["_reset"] * len(ref_env.group_map.keys()),
-        ),
-    )
+    ref_env = ColonelBlottoParallelEnv(num_players=2, num_battlefields=3, device=device)
+    env = ref_env
 
     #check_env_specs(env)
 
@@ -307,9 +306,9 @@ def main(cfg: "DictConfig"):  # noqa: F821
     policy_reg_modules = {}
     policy_optimizers = {}
     for group, agents in ref_env.group_map.items():
-        policy_group = PolicyModule(3, 3, min_energy, max_energy).to(device)
+        policy_group = PolicyModule(1, action_dim, min_energy, max_energy).to(device)
         policy_modules[group] = policy_group
-        policy_reg_group = PolicyModule(3, 3, min_energy, max_energy).to(device)
+        policy_reg_group = PolicyModule(1, action_dim, min_energy, max_energy).to(device)
         copy_weights(policy_group, policy_reg_group)
         policy_reg_modules[group] = policy_reg_group
         policy_optimizers[group] = optim.Adam(policy_group.parameters(), weight_decay=0.0, lr=policy_lr)
@@ -317,14 +316,14 @@ def main(cfg: "DictConfig"):  # noqa: F821
     critics = {}
     critic_optimizers = {}
     for group, agents in ref_env.group_map.items():
-        critic_group = CriticModule(3).to(device)
+        critic_group = CriticModule(1).to(device)
         critics[group] = critic_group
         critic_optimizers[group] = optim.Adam(critic_group.parameters(), weight_decay=0.0, lr=critic_lr)
 
     qvals = {}
     qval_optimizers = {}
     for group, agents in ref_env.group_map.items():
-        critic_group = QCriticModule(3, 3).to(device)
+        critic_group = QCriticModule(1, action_dim).to(device)
         qvals[group] = critic_group
         qval_optimizers[group] = optim.Adam(critic_group.parameters(), weight_decay=0.0, lr=critic_lr)
      
@@ -354,7 +353,16 @@ def main(cfg: "DictConfig"):  # noqa: F821
             copy_weights(policy_modules[group], policy_reg_modules[group])
             
         for train_iter in range(train_iters):
-            td = env.reset()
+            reset_td = TensorDict({
+                "player0": TensorDict({},
+                              batch_size=(num_envs_rollout,)),
+                "player1": TensorDict({},
+                              batch_size=(num_envs_rollout,))
+
+                },
+                batch_size=(num_envs_rollout,),
+                device=env.device)
+            td = env.reset(reset_td)
             action0_sampled, action0_energy = sample_policy(policy_modules[group0], td[group0]['observation'], steps=policy_sample_steps)
             action1_sampled, action1_energy = sample_policy(policy_modules[group1], td[group1]['observation'], steps=policy_sample_steps)
             action0_z_sampled, action0_z_energy = sample_policy(policy_modules[group0], td[group0]['observation'], steps=policy_sample_steps)
@@ -436,21 +444,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
             qvalue1_loss.backward()
             qval_optimizers[group1].step()
 
-            #train policies
-            #obs_batch_size = observations0.shape[0]
-            observation_shape = observations0.shape[1:]
-            observation_repeat = torch.ones((len(observation_shape),), dtype=torch.int32)
-            
-            observations0 = observations0.repeat((n_samples_per_observation, *observation_repeat))
-            observations1 = observations1.repeat((n_samples_per_observation, *observation_repeat))
-
-            #sampled_actions = env.action_spec.sample((64,))
-            train_action0 = torch.distributions.Dirichlet(torch.ones(action_dim)).sample((*observations0.shape[:-1],)).to(observations0.device)
-            #train_action1 = torch.distributions.Dirichlet(torch.ones(action_dim)).sample((*observations1.shape[:-1],)).to(observations1.device)
-            #expectation_action0 = torch.distributions.Dirichlet(torch.ones(action_dim)).sample((*observations0.shape[:-1],))
-            #expectation_action1 = torch.distributions.Dirichlet(torch.ones(action_dim)).sample((*observations1.shape[:-1],))
-            
-            
+            train_action0 = torch.distributions.Dirichlet(torch.ones(action_dim)).sample((num_envs_rollout,1,)).to(observations0.device)
 
             with torch.no_grad():
                 train_qvals0 = qvals[group0](observations0, train_action0)
@@ -541,19 +535,19 @@ def main(cfg: "DictConfig"):  # noqa: F821
                     store_state.update({"value_" + group: critics[group].state_dict()})
                     store_state.update({"qvalue_" + group: qvals[group].state_dict()})
                 torch.save(store_state, "savestate_" + str(fix_iter * train_iters + train_iter + 1))
-            action_samples_policy_0, action_samples_policy_1, policy_0_energy, policy_1_energy = gather_samples(ref_env, policy_modules[group0], policy_modules[group1], 1000, n_sample_steps=policy_sample_steps)
-            action_samples_policy_0 = action_samples_policy_0.detach().cpu().numpy()
-            action_samples_policy_1 = action_samples_policy_1.detach().cpu().numpy()
-            policy_0_energy = policy_0_energy.detach().cpu().numpy()
-            policy_1_energy = policy_1_energy.detach().cpu().numpy()
+        action_samples_policy_0, action_samples_policy_1, policy_0_energy, policy_1_energy = gather_samples(ref_env, policy_modules[group0], policy_modules[group1], 1000, n_sample_steps=policy_sample_steps)
+        action_samples_policy_0 = action_samples_policy_0.detach().cpu().numpy()
+        action_samples_policy_1 = action_samples_policy_1.detach().cpu().numpy()
+        policy_0_energy = policy_0_energy.detach().cpu().numpy()
+        policy_1_energy = policy_1_energy.detach().cpu().numpy()
 
-            qval_0, qval_1, sample_action = gather_qval_samples(ref_env, qvals[group0], qvals[group1], action_dim, 1000)
-            qval_0 = qval_0.detach().cpu().cpu().numpy()
-            qval_1 = qval_1.detach().cpu().cpu().numpy()
-            sample_action = sample_action.detach().cpu().cpu().numpy()
-            plot_samples(action_samples_policy_0, action_samples_policy_1, policy_0_energy, policy_1_energy, 
-                            qval_0, qval_1, sample_action,
-                            100000 * (fix_iter + 1), min_energy, max_energy)
+        qval_0, qval_1, sample_action = gather_qval_samples(ref_env, qvals[group0], qvals[group1], action_dim, 1000)
+        qval_0 = qval_0.detach().cpu().cpu().numpy()
+        qval_1 = qval_1.detach().cpu().cpu().numpy()
+        sample_action = sample_action.detach().cpu().cpu().numpy()
+        plot_samples(action_samples_policy_0, action_samples_policy_1, policy_0_energy, policy_1_energy, 
+                        qval_0, qval_1, sample_action,
+                        100000 * (fix_iter + 1), min_energy, max_energy)
 
         print('Ok')
 
