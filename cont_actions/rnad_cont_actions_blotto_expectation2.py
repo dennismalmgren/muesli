@@ -5,7 +5,7 @@ from torch import multiprocessing
 import tqdm
 from torchrl.envs.libs import PettingZooWrapper
 from envs.matching_pennies_env import MatchingPenniesEnv
-from envs.colonel_blotto_env import ColonelBlottoParallelEnv
+from envs.colonel_blotto_env_torchrl import ColonelBlottoParallelEnv
 from torchrl.envs import (
     check_env_specs,
     RewardSum,
@@ -20,6 +20,7 @@ from torchrl.modules import (
     TanhNormal
 )
 import time
+from tensordict import TensorDict
 from tensordict.nn import TensorDictModule, TensorDictSequential
 from torch.distributions import Categorical
 from torchrl.collectors import SyncDataCollector
@@ -200,7 +201,9 @@ def gather_qval_samples(base_env,
 def gather_samples(base_env, 
                    policy_0, policy_1, 
                    n_samples, n_sample_steps):
-    td_policy = base_env.reset()
+    reset_td = TensorDict({},
+                          batch_size=(n_samples,))
+    td_policy = base_env.reset(reset_td)
     observation0 = td_policy['player_0', 'observation']
     observation1 = td_policy['player_1', 'observation']
     observation_shape = observation0.shape[1:]
@@ -275,10 +278,9 @@ def main(cfg: "DictConfig"):  # noqa: F821
     )
     device = torch.device("cpu")
     #device = torch.device("cpu")
-    ref_env = ColonelBlottoParallelEnv(num_players=2, num_battlefields=3)
-    ref_env = PettingZooWrapper(ref_env, group_map=MarlGroupMapType.ONE_GROUP_PER_AGENT, device=device)
     action_dim = 3
-    num_envs_rollout = 128
+    num_envs_rollout = 1
+    env_batch_size = 128
     min_energy = -10.0
     max_energy = 10.0
     num_iters = 30
@@ -289,31 +291,16 @@ def main(cfg: "DictConfig"):  # noqa: F821
     policy_sample_steps = 40
     n_samples_per_observation = 10
 
-    if num_envs_rollout == 1:
-        env = TransformedEnv(
-            ref_env,
-            RewardSum(
-                in_keys=ref_env.reward_keys,
-                reset_keys=["_reset"] * len(ref_env.group_map.keys()),
-            ),
-        )
-    else:
-        def create_env():
-            base_env = ColonelBlottoParallelEnv(num_players=2, num_battlefields=3)
-            base_env = PettingZooWrapper(base_env, group_map=MarlGroupMapType.ONE_GROUP_PER_AGENT, device=device)
+    ref_env = ColonelBlottoParallelEnv(num_players=2, num_battlefields=3)
+    env = TransformedEnv(
+        ref_env,
+        RewardSum(
+            in_keys=ref_env.reward_keys,
+            reset_keys=["_reset"] * len(ref_env.group_map.keys()),
+        ),
+    )
 
-            
-            env = TransformedEnv(
-                base_env,
-                RewardSum(
-                    in_keys=base_env.reward_keys,
-                    reset_keys=["_reset"] * len(base_env.group_map.keys()),
-                ),
-            )
-            return env
-        
-        env = ParallelEnv(num_workers=num_envs_rollout, create_env_fn = create_env)
-    check_env_specs(env)
+    #check_env_specs(env)
 
     
     policy_modules = {}

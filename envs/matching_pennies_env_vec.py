@@ -10,6 +10,11 @@ ActionType = TypeVar("ActionType")
 AgentID = TypeVar("AgentID")
 
 class MatchingPenniesEnv(ParallelEnv):
+    def __init__(self, batch_size):
+        super().__init__()
+
+        self.batch_size = batch_size
+
     agents = ["1", "2"]
     possible_agents=["1","2"]
 
@@ -30,8 +35,8 @@ class MatchingPenniesEnv(ParallelEnv):
     ) -> tuple[dict[AgentID, ObsType], dict[AgentID, dict]]:
         self.agents = ["1", "2"]
         return {
-            "1": np.array([0.0]),
-            "2": np.array([0.0])
+            "1": np.zeros((self.batch_size, 1)),
+            "2": np.zeros((self.batch_size, 1)),
         }, {
             "1": dict(),
             "2": dict()
@@ -46,36 +51,35 @@ class MatchingPenniesEnv(ParallelEnv):
         dict[AgentID, bool],
         dict[AgentID, dict],
     ]:
-        # reward_dict = {
-        #     (0, 0): (1, -1),
-        #     (0, 1): (-1, 1),
-        #     (1, 0): (-1, 1),
-        #     (1, 1): (1, -1)
-        # }
+        reward_array = np.array([
+            [2, -2],
+            [-3, 3],
+            [-3, 3],
+            [4, -4]
+        ])
 
-        reward_dict = {
-            (0, 0): (2, -2),
-            (0, 1): (-3, 3),
-            (1, 0): (-3, 3),
-            (1, 1): (4, -4)
-        }
+        actions_1 = actions["1"]
+        actions_2 = actions["2"]
+        indices = actions_1 * 2 + actions_2
+        rewards = reward_array[indices]
+        rewards_1 = rewards[:, 0]
+        rewards_2 = rewards[:, 1]
 
-        step_reward = reward_dict[(actions["1"].item(), actions["2"].item())]
         obs = {
-            "1": np.array([0.0]),
-            "2": np.array([0.0])
+            "1": np.zeros((self.batch_size, 1)),
+            "2": np.zeros((self.batch_size, 1))
         }
         reward = {
-            "1": step_reward[0],
-            "2": step_reward[1]
+            "1": rewards_1,
+            "2": rewards_2
         }
         terminated = {
-            "1": True,
-            "2": True
+            "1": np.ones((self.batch_size, 1), dtype=bool),
+            "2": np.ones((self.batch_size, 1), dtype=bool)
         }
         truncated = {
-            "1": False,
-            "2": False
+            "1": np.zeros((self.batch_size, 1), dtype=bool),
+            "2": np.zeros((self.batch_size, 1), dtype=bool)
         }
         info = {
             "1": dict(),
