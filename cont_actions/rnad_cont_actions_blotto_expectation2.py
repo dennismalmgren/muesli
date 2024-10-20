@@ -72,7 +72,7 @@ class CriticModule(nn.Module):
         super().__init__()
         self.input_dim = input_dim
         self.output_dim = 1
-        self.hidden_dim = 10
+        self.hidden_dim = 64
 
         self.embed = nn.Linear(self.input_dim, self.hidden_dim)
         self.hidden = nn.Linear(self.hidden_dim, self.hidden_dim)
@@ -97,7 +97,7 @@ class PolicyModule(nn.Module):
         self.observation_dim = observation_dim 
         self.output_dim = 1
         self.input_dim = observation_dim + action_dim
-        self.hidden_dim = 10
+        self.hidden_dim = 64
         self.min_energy = min_energy
         self.max_energy = max_energy
         self.embed = nn.Linear(self.input_dim, self.hidden_dim)
@@ -149,12 +149,12 @@ def project_onto_simplex(a):
 
     return projected / projected_sum  # Ensure exact sum-to-1 constraint
 
-def sample_policy(policy_module, observation, a_init = None, action_dim=3, steps=10, step_size=0.05):
+def sample_policy(policy_module, observation, a_init = None, action_dim=3, steps=10, step_size=0.01):
     if a_init is None:
         a_init = torch.distributions.Dirichlet(torch.ones(3)).sample(observation.shape[:-1]).to(observation.device)
 #        a_init = torch.randn((*observation.shape[:-1], action_dim))  # Assuming zero mean and unit variance
         # Initialize action from base distribution
-    noise_factor = torch.sqrt(torch.tensor(step_size)).to(observation.device)
+    noise_factor = torch.sqrt(2 * torch.tensor(step_size)).to(observation.device)
     a = a_init.clone()
     for _ in range(steps):
         a.requires_grad = True
@@ -165,7 +165,7 @@ def sample_policy(policy_module, observation, a_init = None, action_dim=3, steps
         energy.backward()
         noise = torch.randn_like(a) * noise_factor
         with torch.no_grad():
-            a -= (step_size / 2) * a.grad
+            a -= step_size * a.grad
             a += noise
             a = project_onto_simplex(a)
 
@@ -263,8 +263,8 @@ def plot_samples(action_samples_policy_0, action_samples_policy_1,
     # Scatter plot the points inside the triangle
     ax[0, 0].scatter(points_2d_policy_0[:, 0], points_2d_policy_0[:, 1], c=norm_policy_0_energy, cmap='coolwarm', alpha=0.8)
     ax[0, 1].scatter(points_2d_policy_1[:, 0], points_2d_policy_1[:, 1], c=norm_policy_1_energy, cmap='coolwarm', alpha=0.8)
-    ax[1, 0].scatter(points_2d_qval[:, 0], points_2d_qval[:, 1], c=qval_0, cmap='coolwarm', alpha=0.8)
-    ax[1, 1].scatter(points_2d_qval[:, 0], points_2d_qval[:, 1], c=qval_1, cmap='coolwarm', alpha=0.8)
+    ax[1, 0].scatter(points_2d_qval[:, 0], points_2d_qval[:, 1], c=qval_0, cmap='coolwarm', alpha=0.8, vmin=-1.5, vmax=1.5)
+    ax[1, 1].scatter(points_2d_qval[:, 0], points_2d_qval[:, 1], c=qval_1, cmap='coolwarm', alpha=0.8, vmin=-1.5, vmax=1.5)
     # ax[0, 0].legend()
     # ax[0, 1].legend()
     # ax[1, 0].legend()
@@ -285,15 +285,15 @@ def main(cfg: "DictConfig"):  # noqa: F821
     device = torch.device("cpu")
     #device = torch.device("cpu")
     action_dim = 3
-    num_envs_rollout = 1000
-    min_energy = -10.0
-    max_energy = 10.0
+    num_envs_rollout = 10000
+    min_energy = -100.0
+    max_energy = 100.0
     num_iters = 30
     train_iters = 10000
     lr_steps = num_iters * train_iters
     policy_lr = 3e-4
     critic_lr = 3e-3
-    policy_sample_steps = 40
+    policy_sample_steps = 100
     n_samples_per_observation = 10
 
     ref_env = ColonelBlottoParallelEnv(num_players=2, num_battlefields=3, device=device)
@@ -322,7 +322,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
 
     qvals = {}
     qval_optimizers = {}
-    for group, agents in ref_env.group_map.items():
+    for group, agents in ref_env.group_map.items(): 
         critic_group = QCriticModule(1, action_dim).to(device)
         qvals[group] = critic_group
         qval_optimizers[group] = optim.Adam(critic_group.parameters(), weight_decay=0.0, lr=critic_lr)
@@ -449,11 +449,13 @@ def main(cfg: "DictConfig"):  # noqa: F821
             with torch.no_grad():
                 train_qvals0 = qvals[group0](observations0, train_action0)
                 train_qvals1 = qvals[group1](observations1, train_action0)
+                #train_qvals0 = qvals[group0](observations0, action0)
+                #train_qvals1 = qvals[group1](observations1, action1)                
                 train_vals0 = critics[group0](observations0)
                 train_vals1 = critics[group1](observations1)
 
-                advantages0 = train_qvals0 - train_vals0
-                advantages1 = train_qvals1 - train_vals1
+                advantages0 = train_qvals0# - train_vals0
+                advantages1 = train_qvals1# - train_vals1
                 
                 #expectation_qvals0 = qvals[group0](observations0, expectation_action0)
                 #expectation_qvals1 = qvals[group1](observations1, expectation_action1)
@@ -462,7 +464,9 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 
 
             train_energy0 = policy_modules[group0](observations0, train_action0)
-            train_energy1 = policy_modules[group1](observations1, train_action0)          
+            train_energy1 = policy_modules[group1](observations1, train_action0)   
+#            train_energy0 = policy_modules[group0](observations0, action0)
+#            train_energy1 = policy_modules[group1](observations1, action1)        
             #expectation_energy0 = policy_modules[group0](observations0, expectation_action0)
             #expectation_energy1 = policy_modules[group1](observations1, expectation_action1)          
 
@@ -492,15 +496,13 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 #indicator_expectation_advantages1 = (indicator_decrease1 | indicator_increase1) * expectation_advantages1
 
             #0.5 is due to importance weight of uniform sampling from 3-d simplex
-            policy0_loss = 0.5 * torch.mean(train_energy0 * indicator_advantages0) #how do we construct the policy loss?
-            #policy0_loss = 0.5 * torch.mean(train_energy0 * indicator_advantages0 - expectation_energy0 * indicator_expectation_advantages0) #how do we construct the policy loss?
-            #policy0_loss = torch.mean(torch.exp(action0_logprob) * advantages0)
+            policy0_loss = 0.5 * torch.mean(train_energy0 * indicator_advantages0) + 0.01 * torch.square(torch.mean(train_energy0))#how do we construct the policy loss?
             policy_optimizers[group0].zero_grad()
             policy0_loss.backward()
             policy_optimizers[group0].step()
             #0.5 is due to importance weight of uniform sampling from 3-d simplex
 
-            policy1_loss = 0.5 * torch.mean(train_energy1 * indicator_advantages1)
+            policy1_loss = 0.5 * torch.mean(train_energy1 * indicator_advantages1) + 0.01 * torch.square(torch.mean(train_energy1))
             #policy1_loss = 0.5 * torch.mean(train_energy1 * indicator_advantages1 - expectation_energy1 * indicator_expectation_advantages1)
             #policy1_loss = torch.mean(torch.exp(action1_logprob) * advantages1)
             policy_optimizers[group1].zero_grad()
