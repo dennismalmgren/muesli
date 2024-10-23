@@ -244,8 +244,8 @@ def plot_samples(action_samples_policy_0, action_samples_policy_1,
     qval_0 = qval_0.squeeze()
     qval_1 = qval_1.squeeze()
     # Plot the simplex (triangle)
-    fig, ax = plt.subplots(2, 2, figsize=(6, 6))
-    for i in range(2):
+    fig, ax = plt.subplots(3, 2, figsize=(6, 6))
+    for i in range(3):
         for j in range(2):
             ax[i, j].plot([vertices[0, 0], vertices[1, 0]], [vertices[0, 1], vertices[1, 1]], 'k-', lw=2)
             ax[i, j].plot([vertices[1, 0], vertices[2, 0]], [vertices[1, 1], vertices[2, 1]], 'k-', lw=2)
@@ -265,6 +265,8 @@ def plot_samples(action_samples_policy_0, action_samples_policy_1,
     ax[0, 1].scatter(points_2d_policy_1[:, 0], points_2d_policy_1[:, 1], c=norm_policy_1_energy, cmap='coolwarm', alpha=0.8)
     ax[1, 0].scatter(points_2d_qval[:, 0], points_2d_qval[:, 1], c=qval_0, cmap='coolwarm', alpha=0.8, vmin=-1.5, vmax=1.5)
     ax[1, 1].scatter(points_2d_qval[:, 0], points_2d_qval[:, 1], c=qval_1, cmap='coolwarm', alpha=0.8, vmin=-1.5, vmax=1.5)
+    ax[2, 0].scatter(points_2d_qval[:, 0], points_2d_qval[:, 1], c=qval_0, cmap='coolwarm', alpha=0.8)
+    ax[2, 1].scatter(points_2d_qval[:, 0], points_2d_qval[:, 1], c=qval_1, cmap='coolwarm', alpha=0.8)
     # ax[0, 0].legend()
     # ax[0, 1].legend()
     # ax[1, 0].legend()
