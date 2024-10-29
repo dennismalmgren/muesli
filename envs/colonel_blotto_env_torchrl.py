@@ -128,52 +128,6 @@ class ColonelBlottoParallelEnv(EnvBase):
     def _set_seed(self, seed: int | None):
         ...
 
-    # def reset(
-    #     self,
-    #     seed: int | None = None,
-    #     options: dict | None = None,
-    # ) -> tuple[dict[AgentID, ObsType], dict[AgentID, dict]]:
-    #     allocations = np.zeros((self.num_players, self.batch_size, self.num_battlefields))
-    #     return {agent: allocations[self.agent_name_mapping(agent), i] for agent in self.agents for i in range(self.batch_size)}, self.infos
-    
-    # def softmax_stable(self, x):
-    #     return(np.exp(x - np.max(x, axis=-1, keepdims=True)) / np.exp(x - np.max(x, axis=-1, keepdims=True)).sum(axis=-1, keepdims=True))
-
-#     def step(
-#         self, actions: dict[AgentID, ActionType]
-#     ) -> tuple[
-#         dict[AgentID, ObsType],
-#         dict[AgentID, float],
-#         dict[AgentID, bool],
-#         dict[AgentID, bool],
-#         dict[AgentID, dict],
-#     ]:
-#         allocations = np.zeros((self.num_players, self.batch_size, self.num_battlefields))
-#         # Store the allocations from all players
-#         for agent, action in actions.items():
-#             agent_index = self.agent_name_mapping(agent)
-#             # action_sum = np.sum(action, ).item()
-#             # if not np.isclose(action_sum, 1.0):
-#             #     action = self.softmax_stable(action)
-#             #     print("Warning, normalizing input")
-# #                action = np.ones_like(action)
-# #            action = action / np.sum(action) * self.budgets[agent_index]
-#             allocations[agent_index, :] = action
-
-#         # Calculate rewards based on the allocations
-#         rewards = self._calculate_rewards(allocations)
-
-#         return {agent: allocations[self.agent_name_mapping(agent)] for agent in self.agents}, rewards, self.terminateds, self.truncateds, self.infos
-
-    # def _calculate_rewards(self):
-    #     stability_epsilon = 1e-6
-    #     for j in range(self.num_battlefields):
-    #         allocations = self.allocations[:, j] + stability_epsilon
-    #         win_probabilities = allocations / np.sum(allocations) #todo: numeric stability.
-            
-    #         for i in range(self.num_players):
-    #             self.rewards[f"player_{i}"] += self.values[i, j] * win_probabilities[i]
-
     def _calculate_rewards(self, allocations):
         batch_size = allocations.shape[0]
         #allocations are batch_size x agent_id x battlefield
@@ -198,14 +152,4 @@ class ColonelBlottoParallelEnv(EnvBase):
                 rewards[:, i, 0] -= 0.5
         return rewards
     
-
-    # def render(self) -> None | np.ndarray | str | list:
-    #     print(f"Allocations:\n {self.allocations}")
-    #     print(f"Rewards: {self.rewards}")
-
-    # def close(self):
-    #     pass
-
-    # def agent_name_mapping(self, agent):
-    #     return int(agent.split("_")[1])
 

@@ -86,15 +86,6 @@ class ColonelBlottoParallelEnv(ParallelEnv):
 
         return {agent: self.allocations[self.agent_name_mapping(agent)] for agent in self.agents}, self.rewards, self.terminateds, self.truncateds, self.infos
 
-    # def _calculate_rewards(self):
-    #     stability_epsilon = 1e-6
-    #     for j in range(self.num_battlefields):
-    #         allocations = self.allocations[:, j] + stability_epsilon
-    #         win_probabilities = allocations / np.sum(allocations) #todo: numeric stability.
-            
-    #         for i in range(self.num_players):
-    #             self.rewards[f"player_{i}"] += self.values[i, j] * win_probabilities[i]
-
     def _calculate_rewards(self):
         for j in range(self.num_battlefields):
             allocations = self.allocations[:, j]

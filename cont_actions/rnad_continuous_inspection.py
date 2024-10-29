@@ -132,24 +132,6 @@ def regularize_reward_energy(reward, action_i_energy, action_i_reg_energy, actio
     return reward - eta * own_policy_reward + \
                     eta * adv_policy_reward
 
-def project_onto_simplex(a):
-    """
-    Projects the input 'a' onto the probability simplex (i.e., makes sure the elements sum to 1 and are >= 0).
-    """
-    sorted_a, _ = torch.sort(a, descending=True)
-    cumsum = torch.cumsum(sorted_a, dim=-1) - 1
-    rho = torch.arange(1, len(a) + 1, device=a.device).float()
-    delta_dims = a.dim() - rho.dim()
-    for _ in range(delta_dims):
-        rho = rho.unsqueeze(-1) #note, this should match all dimensions of a.
-    theta = (cumsum / rho).max(dim=-1, keepdim=True)[0]
-    epsilon = 1e-10
-    projected = torch.clamp(a - theta, min=epsilon)
-    projected_sum = projected.sum(-1, keepdim=True)
-    #projected_sum[projected_sum < epsilon] = epsilon
-
-    return projected / projected_sum  # Ensure exact sum-to-1 constraint
-
 def sample_policy(policy_module, observation, a_init = None, action_dim=3, steps=10, step_size=0.01):
     if a_init is None:
         a_init = torch.distributions.Dirichlet(torch.ones(3)).sample(observation.shape[:-1]).to(observation.device)
@@ -168,6 +150,7 @@ def sample_policy(policy_module, observation, a_init = None, action_dim=3, steps
         with torch.no_grad():
             a -= step_size * a.grad
             a += noise
+            
             a = project_onto_simplex(a)
 
             #a.grad.zero_()
