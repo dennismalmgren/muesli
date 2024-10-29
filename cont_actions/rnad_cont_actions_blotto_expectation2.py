@@ -305,7 +305,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
         if torch.cuda.is_available() and not is_fork
         else torch.device("cpu")
     )
-    device = torch.device("cpu")
+    #device = torch.device("cpu")
     #device = torch.device("cpu")
     action_dim = 3
     num_envs_rollout = 10000
