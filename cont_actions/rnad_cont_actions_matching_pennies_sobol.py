@@ -5,7 +5,7 @@ from torch import multiprocessing
 import tqdm
 from torchrl.envs.libs import PettingZooWrapper
 from envs.matching_pennies_env import MatchingPenniesEnv
-from envs.colonel_blotto_env_torchrl import ColonelBlottoParallelEnv
+from envs.continuous_matching_pennies_env import ContinuousMatchingPenniesEnv
 from torchrl.envs import (
     check_env_specs,
     RewardSum,
@@ -72,7 +72,7 @@ class CriticModule(nn.Module):
         super().__init__()
         self.input_dim = input_dim
         self.output_dim = 1
-        self.hidden_dim = 64
+        self.hidden_dim = 10
 
         self.embed = nn.Linear(self.input_dim, self.hidden_dim)
         self.hidden = nn.Linear(self.hidden_dim, self.hidden_dim)
@@ -97,7 +97,7 @@ class PolicyModule(nn.Module):
         self.observation_dim = observation_dim 
         self.output_dim = 1
         self.input_dim = observation_dim + action_dim
-        self.hidden_dim = 64
+        self.hidden_dim = 10
         self.min_energy = min_energy
         self.max_energy = max_energy
         self.embed = nn.Linear(self.input_dim, self.hidden_dim)
@@ -131,72 +131,51 @@ def regularize_reward_energy(reward, action_i_energy, action_i_reg_energy, actio
     return reward - eta * own_policy_reward + \
                     eta * adv_policy_reward
 
-# def project_onto_simplex(a):
-#     """
-#     Projects the input 'a' onto the probability simplex (i.e., makes sure the elements sum to 1 and are >= 0).
-#     """
-#     sorted_a, _ = torch.sort(a, descending=True)
-#     cumsum = torch.cumsum(sorted_a, dim=-1) - 1
-#     rho = torch.arange(1, len(a) + 1, device=a.device).float()
-#     delta_dims = a.dim() - rho.dim()
-#     for _ in range(delta_dims):
-#         rho = rho.unsqueeze(-1) #note, this should match all dimensions of a.
-#     theta = (cumsum / rho).max(dim=-1, keepdim=True)[0]
-#     epsilon = 1e-10
-#     projected = torch.clamp(a - theta, min=epsilon)
-#     projected_sum = projected.sum(-1, keepdim=True)
-#     #projected_sum[projected_sum < epsilon] = epsilon
+def project_onto_simplex(a):
+    """
+    Projects the input 'a' onto the probability simplex (i.e., makes sure the elements sum to 1 and are >= 0).
+    """
+    sorted_a, _ = torch.sort(a, descending=True)
+    cumsum = torch.cumsum(sorted_a, dim=-1) - 1
+    rho = torch.arange(1, len(a) + 1, device=a.device).float()
+    delta_dims = a.dim() - rho.dim()
+    for _ in range(delta_dims):
+        rho = rho.unsqueeze(-1) #note, this should match all dimensions of a.
+    theta = (cumsum / rho).max(dim=-1, keepdim=True)[0]
+    epsilon = 1e-10
+    projected = torch.clamp(a - theta, min=epsilon)
+    projected_sum = projected.sum(-1, keepdim=True)
+    #projected_sum[projected_sum < epsilon] = epsilon
 
-#    return projected / projected_sum  # Ensure exact sum-to-1 constraint
-def sample_policy(policy_module, observation, x_init=None, action_dim=3, steps=10, step_size=0.01):
-    if x_init is None:
-        x_init = torch.randn((*observation.shape[:-1], action_dim), device=observation.device)
-    noise_factor = torch.sqrt(2 * torch.tensor(step_size)).to(observation.device)
-    x = x_init.clone()
+    return projected / projected_sum  # Ensure exact sum-to-1 constraint
+
+def sample_policy(policy_module, observation, a_init = None, action_dim=3, steps=10, step_size=0.05):
+    if a_init is None:
+        a_init = torch.distributions.Uniform(0.0, 1.0).sample((*observation.shape[:-1], action_dim)).to(observation.device)
+#        a_init = torch.randn((*observation.shape[:-1], action_dim))  # Assuming zero mean and unit variance
+        # Initialize action from base distribution
+    noise_factor = torch.sqrt(torch.tensor(step_size)).to(observation.device)
+    a = a_init.clone()
     for _ in range(steps):
-        x.requires_grad = True
-        a = torch.softmax(x, dim=-1)
+        a.requires_grad = True
         energy = policy_module(observation, a)
-        # Adjust energy with log-det Jacobian of softmax
-        log_jacobian = -torch.sum(torch.log(a + 1e-10), dim=-1)
-        adjusted_energy = energy - log_jacobian
-        adjusted_energy = adjusted_energy.sum()
-        adjusted_energy.backward()
-        noise = torch.randn_like(x) * noise_factor
+#        grad_a = torch.autograd.grad(outputs=energy.sum(), inputs=a, create_graph=True)[0]
+
+        energy = energy.sum()
+        energy.backward()
+        noise = torch.randn_like(a) * noise_factor
         with torch.no_grad():
-            x -= step_size * x.grad
-            x += noise
-    a = torch.softmax(x, dim=-1).detach()
-    a_energy = policy_module(observation, a)
-    return a, a_energy
+            a -= (step_size / 2) * a.grad
+            a += noise
+            a = torch.clamp(a, 0.0, 1.0)
 
-# def sample_policy(policy_module, observation, a_init = None, action_dim=3, steps=10, step_size=0.01):
-#     if a_init is None:
-#         a_init = torch.distributions.Dirichlet(torch.ones(3)).sample(observation.shape[:-1]).to(observation.device)
-# #        a_init = torch.randn((*observation.shape[:-1], action_dim))  # Assuming zero mean and unit variance
-#         # Initialize action from base distribution
-#     noise_factor = torch.sqrt(2 * torch.tensor(step_size)).to(observation.device)
-#     a = a_init.clone()
-#     for _ in range(steps):
-#         a.requires_grad = True
-#         energy = policy_module(observation, a)
-# #        grad_a = torch.autograd.grad(outputs=energy.sum(), inputs=a, create_graph=True)[0]
+            #a.grad.zero_()
 
-#         energy = energy.sum()
-#         energy.backward()
-#         noise = torch.randn_like(a) * noise_factor
-#         with torch.no_grad():
-#             a -= step_size * a.grad
-#             a += noise
-#             a = project_onto_simplex(a)
-
-#             #a.grad.zero_()
-
-#     a = a.detach()
-#     #a_unconstrained_energy = policy_module(observation, a_unconstrained)
+    a = a.detach()
+    #a_unconstrained_energy = policy_module(observation, a_unconstrained)
     
-#     a_energy = policy_module(observation, a)   
-#     return a, a_energy
+    a_energy = policy_module(observation, a)   
+    return a, a_energy
 
 def copy_weights(source_policy, target_policy):
     target_policy.load_state_dict(source_policy.state_dict())
@@ -216,7 +195,7 @@ def gather_qval_samples(base_env,
                           device=base_env.device)
     td_qval = base_env.reset(reset_td)
     
-    sample_action = torch.distributions.Dirichlet(torch.ones(action_dim)).sample((n_samples, 1,)).to(reset_td.device)
+    sample_action = torch.distributions.Uniform(0.0, 1.0).sample((*td_qval["player0", "observation"].shape[:-1], action_dim)).to(reset_td.device)
     qval_0 = qval_module_0(td_qval["player0", "observation"], sample_action)
     qval_1 = qval_module_1(td_qval["player1", "observation"], sample_action)
 
@@ -224,7 +203,9 @@ def gather_qval_samples(base_env,
 
 def gather_samples(base_env, 
                    policy_0, policy_1, 
-                   n_samples, n_sample_steps):
+                   action_dim,
+                   n_samples, 
+                   n_sample_steps):
     reset_td = TensorDict({
         "player0": TensorDict({},
                               batch_size=(n_samples,)),
@@ -236,8 +217,8 @@ def gather_samples(base_env,
                           device=base_env.device)
     td_policy = base_env.reset(reset_td)
 
-    policy_0_action, policy_0_energy = sample_policy(policy_0, td_policy["player0", "observation"], steps=n_sample_steps)
-    policy_1_action, policy_1_energy = sample_policy(policy_1, td_policy["player1", "observation"], steps=n_sample_steps)
+    policy_0_action, policy_0_energy = sample_policy(policy_0, td_policy["player0", "observation"], action_dim=action_dim, steps=n_sample_steps)
+    policy_1_action, policy_1_energy = sample_policy(policy_1, td_policy["player1", "observation"], action_dim=action_dim, steps=n_sample_steps)
     return policy_0_action, policy_1_action, policy_0_energy, policy_1_energy
 
 
@@ -245,52 +226,53 @@ def plot_samples(action_samples_policy_0, action_samples_policy_1,
                  policy_0_energy, policy_1_energy, 
                  qval_0, qval_1, sample_action,
                  iteration, min_energy, max_energy):
-    #tbd
-    vertices = np.array([[0, 0], [1, 0], [0.5, np.sqrt(3)/2]])
-
-    def to_barycentric(point):
-        # The point should sum to 1, or be normalized
-        return point @ vertices
-
-#    action_samples_policy_0[action_samples_policy_0.sum(-1) == 0, :] = 1.0
-#    action_samples_policy_1[action_samples_policy_1.sum(-1) == 0, :] = 1.0
-#    action_samples_policy_0 = action_samples_policy_0 / action_samples_policy_0.sum(-1, keepdims=True)
-#    action_samples_policy_1 = action_samples_policy_1 / action_samples_policy_1.sum(-1, keepdims=True)
-    points_2d_qval = np.array([to_barycentric(p) for p in sample_action]).squeeze()
-
-    points_2d_policy_0 = np.array([to_barycentric(p) for p in action_samples_policy_0]).squeeze()
-    points_2d_policy_1 = np.array([to_barycentric(p) for p in action_samples_policy_1]).squeeze()
+    
+    # Normalize policy energies for color scaling
     norm_policy_0_energy = (policy_0_energy.squeeze() - min_energy) / (max_energy - min_energy)
     norm_policy_1_energy = (policy_1_energy.squeeze() - min_energy) / (max_energy - min_energy)
+    
     qval_0 = qval_0.squeeze()
     qval_1 = qval_1.squeeze()
-    # Plot the simplex (triangle)
-    fig, ax = plt.subplots(2, 2, figsize=(6, 6))
-    for i in range(2):
-        for j in range(2):
-            ax[i, j].plot([vertices[0, 0], vertices[1, 0]], [vertices[0, 1], vertices[1, 1]], 'k-', lw=2)
-            ax[i, j].plot([vertices[1, 0], vertices[2, 0]], [vertices[1, 1], vertices[2, 1]], 'k-', lw=2)
-            ax[i, j].plot([vertices[2, 0], vertices[0, 0]], [vertices[2, 1], vertices[0, 1]], 'k-', lw=2)    
-
-            # Annotate the vertices to show actions corresponding to each corner
-            ax[i, j].text(vertices[0, 0], vertices[0, 1] - 0.05, 'Action 1', fontsize=12, ha='center')
-            ax[i, j].text(vertices[1, 0], vertices[1, 1] - 0.05, 'Action 2', fontsize=12, ha='center')
-            ax[i, j].text(vertices[2, 0], vertices[2, 1] + 0.05, 'Action 3', fontsize=12, ha='center')
-
-            ax[i, j].set_xlim(-0.1, 1.1)
-            ax[i, j].set_ylim(-0.1, np.sqrt(3)/2 + 0.1)
-            ax[i, j].set_aspect('equal', adjustable='box')
-
-    # Scatter plot the points inside the triangle
-    ax[0, 0].scatter(points_2d_policy_0[:, 0], points_2d_policy_0[:, 1], c=norm_policy_0_energy, cmap='coolwarm', alpha=0.8)
-    ax[0, 1].scatter(points_2d_policy_1[:, 0], points_2d_policy_1[:, 1], c=norm_policy_1_energy, cmap='coolwarm', alpha=0.8)
-    ax[1, 0].scatter(points_2d_qval[:, 0], points_2d_qval[:, 1], c=qval_0, cmap='coolwarm', alpha=0.8, vmin=-1.5, vmax=1.5)
-    ax[1, 1].scatter(points_2d_qval[:, 0], points_2d_qval[:, 1], c=qval_1, cmap='coolwarm', alpha=0.8, vmin=-1.5, vmax=1.5)
-    # ax[0, 0].legend()
-    # ax[0, 1].legend()
-    # ax[1, 0].legend()
-    # ax[1, 1].legend()
     
+    fig, ax = plt.subplots(2, 2, figsize=(10, 8))
+
+    # Histogram for Policy 0's action samples
+    ax[0, 0].scatter(action_samples_policy_0.squeeze(), norm_policy_0_energy.squeeze(), alpha=0.7, label="Policy 0 Actions")
+    ax[0, 0].set_title("Histogram of Policy 0 Actions")
+    ax[0, 0].set_xlabel("Action Value")
+    ax[0, 0].set_ylabel("Energy")
+    ax[0, 0].set_xlim(0, 1)
+    ax[0, 0].set_ylim(0.0, 1.0)
+    
+    ax[0, 0].legend()
+
+    # Histogram for Policy 1's action samples
+    ax[0, 1].scatter(action_samples_policy_1.squeeze(), norm_policy_1_energy.squeeze(), alpha=0.7, label="Policy 1 Actions")
+    ax[0, 1].set_title("Histogram of Policy 1 Actions")
+    ax[0, 1].set_xlabel("Action Value")
+    ax[0, 1].set_ylabel("Energy")
+    ax[0, 1].set_xlim(0, 1)
+    ax[0, 1].set_ylim(0.0, 1.0)
+    ax[0, 1].legend()
+
+    # Line plot of Q-values for Policy 0
+    ax[1, 0].scatter(sample_action.flatten(), qval_0, color='blue', label="Q-value Policy 0")
+    ax[1, 0].set_title("Q-values for Policy 0")
+    ax[1, 0].set_xlabel("Action Value")
+    ax[1, 0].set_ylabel("Q-value")
+    ax[1, 0].set_xlim(0, 1)
+    ax[1, 0].legend()
+
+    # Line plot of Q-values for Policy 1
+    ax[1, 1].scatter(sample_action.flatten(), qval_1, color='red', label="Q-value Policy 1")
+    ax[1, 1].set_title("Q-values for Policy 1")
+    ax[1, 1].set_xlabel("Action Value")
+    ax[1, 1].set_ylabel("Q-value")
+    ax[1, 1].set_xlim(0, 1)
+    ax[1, 1].legend()
+
+    # Adjust layout and save plot
+    plt.tight_layout()
     plt.savefig(f'policy_distribution_iter_{iteration}.png')
     plt.close()
 
@@ -305,19 +287,19 @@ def main(cfg: "DictConfig"):  # noqa: F821
     )
     device = torch.device("cpu")
     #device = torch.device("cpu")
-    action_dim = 3
-    num_envs_rollout = 10000
-    min_energy = -100.0
-    max_energy = 100.0
+    action_dim = 1
+    num_envs_rollout = 1000
+    min_energy = -10.0
+    max_energy = 10.0
     num_iters = 30
     train_iters = 10000
     lr_steps = num_iters * train_iters
     policy_lr = 3e-4
     critic_lr = 3e-3
-    policy_sample_steps = 100
+    policy_sample_steps = 10
     n_samples_per_observation = 10
 
-    ref_env = ColonelBlottoParallelEnv(num_players=2, num_battlefields=3, device=device)
+    ref_env = ContinuousMatchingPenniesEnv(num_players=2, device=device)
     env = ref_env
 
     #check_env_specs(env)
@@ -343,7 +325,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
 
     qvals = {}
     qval_optimizers = {}
-    for group, agents in ref_env.group_map.items(): 
+    for group, agents in ref_env.group_map.items():
         critic_group = QCriticModule(1, action_dim).to(device)
         qvals[group] = critic_group
         qval_optimizers[group] = optim.Adam(critic_group.parameters(), weight_decay=0.0, lr=critic_lr)
@@ -354,6 +336,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
 
     action_samples_policy_0, action_samples_policy_1, policy_0_energy, policy_1_energy = \
         gather_samples(ref_env, policy_modules[group0], policy_modules[group1], 
+                       action_dim,
                        1000, n_sample_steps=policy_sample_steps)
     qval_0, qval_1, sample_action = gather_qval_samples(ref_env, qvals[group0], qvals[group1], action_dim, 1000)
     qval_0 = qval_0.detach().cpu().numpy()
@@ -384,10 +367,10 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 batch_size=(num_envs_rollout,),
                 device=env.device)
             td = env.reset(reset_td)
-            action0_sampled, action0_energy = sample_policy(policy_modules[group0], td[group0]['observation'], steps=policy_sample_steps)
-            action1_sampled, action1_energy = sample_policy(policy_modules[group1], td[group1]['observation'], steps=policy_sample_steps)
-            action0_z_sampled, action0_z_energy = sample_policy(policy_modules[group0], td[group0]['observation'], steps=policy_sample_steps)
-            action1_z_sampled, action1_z_energy = sample_policy(policy_modules[group1], td[group1]['observation'], steps=policy_sample_steps)
+            action0_sampled, action0_energy = sample_policy(policy_modules[group0], td[group0]['observation'], action_dim=action_dim, steps=policy_sample_steps)
+            action1_sampled, action1_energy = sample_policy(policy_modules[group1], td[group1]['observation'], action_dim=action_dim, steps=policy_sample_steps)
+            action0_z_sampled, action0_z_energy = sample_policy(policy_modules[group0], td[group0]['observation'], action_dim=action_dim, steps=policy_sample_steps)
+            action1_z_sampled, action1_z_energy = sample_policy(policy_modules[group1], td[group1]['observation'], action_dim=action_dim, steps=policy_sample_steps)
             td[group0]["action"] = action0_sampled
             #td[group0]["action_unconstrained"] = action0_unconstrained
             td[group0]["action_energy"] = action0_energy
@@ -443,6 +426,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
 
                 reward0 = regularize_reward_energy(reward0_game, energy0, reg_energy0, energy1, reg_energy1, energy0_z, reg_energy0_z, energy1_z, reg_energy1_z)
                 reward1 = regularize_reward_energy(reward1_game, energy1, reg_energy1, energy0, reg_energy0, energy1_z, reg_energy1_z, energy0_z, reg_energy0_z)
+                #reward0 = reward0_game
+                #reward1 = reward1_game
 
             #Train critics
             critic0_loss = F.mse_loss(value0, reward0)
@@ -465,18 +450,18 @@ def main(cfg: "DictConfig"):  # noqa: F821
             qvalue1_loss.backward()
             qval_optimizers[group1].step()
 
-            train_action0 = torch.distributions.Dirichlet(torch.ones(action_dim)).sample((num_envs_rollout,1,)).to(observations0.device)
+            train_action0 = torch.distributions.Uniform(0, 1).sample((num_envs_rollout,1,1, )).to(observations0.device)
 
             with torch.no_grad():
                 train_qvals0 = qvals[group0](observations0, train_action0)
                 train_qvals1 = qvals[group1](observations1, train_action0)
                 #train_qvals0 = qvals[group0](observations0, action0)
-                #train_qvals1 = qvals[group1](observations1, action1)                
+                #train_qvals1 = qvals[group1](observations1, action1)
                 train_vals0 = critics[group0](observations0)
                 train_vals1 = critics[group1](observations1)
 
-                advantages0 = train_qvals0# - train_vals0
-                advantages1 = train_qvals1# - train_vals1
+                advantages0 = train_qvals0 - train_vals0
+                advantages1 = train_qvals1 - train_vals1
                 
                 #expectation_qvals0 = qvals[group0](observations0, expectation_action0)
                 #expectation_qvals1 = qvals[group1](observations1, expectation_action1)
@@ -485,9 +470,10 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 
 
             train_energy0 = policy_modules[group0](observations0, train_action0)
-            train_energy1 = policy_modules[group1](observations1, train_action0)   
+            train_energy1 = policy_modules[group1](observations1, train_action0)      
+
 #            train_energy0 = policy_modules[group0](observations0, action0)
-#            train_energy1 = policy_modules[group1](observations1, action1)        
+#            train_energy1 = policy_modules[group1](observations1, action1)      
             #expectation_energy0 = policy_modules[group0](observations0, expectation_action0)
             #expectation_energy1 = policy_modules[group1](observations1, expectation_action1)          
 
@@ -517,13 +503,15 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 #indicator_expectation_advantages1 = (indicator_decrease1 | indicator_increase1) * expectation_advantages1
 
             #0.5 is due to importance weight of uniform sampling from 3-d simplex
-            policy0_loss = 0.5 * torch.mean(train_energy0 * indicator_advantages0) + 0.01 * torch.square(torch.mean(train_energy0))#how do we construct the policy loss?
+            policy0_loss = torch.mean(train_energy0 * indicator_advantages0) #how do we construct the policy loss?
+            #policy0_loss = 0.5 * torch.mean(train_energy0 * indicator_advantages0 - expectation_energy0 * indicator_expectation_advantages0) #how do we construct the policy loss?
+            #policy0_loss = torch.mean(torch.exp(action0_logprob) * advantages0)
             policy_optimizers[group0].zero_grad()
             policy0_loss.backward()
             policy_optimizers[group0].step()
             #0.5 is due to importance weight of uniform sampling from 3-d simplex
 
-            policy1_loss = 0.5 * torch.mean(train_energy1 * indicator_advantages1) + 0.01 * torch.square(torch.mean(train_energy1))
+            policy1_loss = torch.mean(train_energy1 * indicator_advantages1)
             #policy1_loss = 0.5 * torch.mean(train_energy1 * indicator_advantages1 - expectation_energy1 * indicator_expectation_advantages1)
             #policy1_loss = torch.mean(torch.exp(action1_logprob) * advantages1)
             policy_optimizers[group1].zero_grad()
@@ -538,7 +526,9 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 print(f"Mean critic prediction policy 1: {value1.mean()} mean reward: {reward1_game.mean()}, mean regularized reward: {reward1.mean()}")
 
             if train_iter % 500 == 0:
-                action_samples_policy_0, action_samples_policy_1, policy_0_energy, policy_1_energy = gather_samples(ref_env, policy_modules[group0], policy_modules[group1], 1000, n_sample_steps=policy_sample_steps)
+                action_samples_policy_0, action_samples_policy_1, policy_0_energy, policy_1_energy = \
+                    gather_samples(ref_env, policy_modules[group0], policy_modules[group1], 
+                                   action_dim, 1000, n_sample_steps=policy_sample_steps)
                 action_samples_policy_0 = action_samples_policy_0.detach().cpu().numpy()
                 action_samples_policy_1 = action_samples_policy_1.detach().cpu().numpy()
                 policy_0_energy = policy_0_energy.detach().cpu().numpy()
@@ -558,7 +548,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
                     store_state.update({"value_" + group: critics[group].state_dict()})
                     store_state.update({"qvalue_" + group: qvals[group].state_dict()})
                 torch.save(store_state, "savestate_" + str(fix_iter * train_iters + train_iter + 1))
-        action_samples_policy_0, action_samples_policy_1, policy_0_energy, policy_1_energy = gather_samples(ref_env, policy_modules[group0], policy_modules[group1], 1000, n_sample_steps=policy_sample_steps)
+        action_samples_policy_0, action_samples_policy_1, policy_0_energy, policy_1_energy = \
+            gather_samples(ref_env, policy_modules[group0], policy_modules[group1], action_dim, 1000, n_sample_steps=policy_sample_steps)
         action_samples_policy_0 = action_samples_policy_0.detach().cpu().numpy()
         action_samples_policy_1 = action_samples_policy_1.detach().cpu().numpy()
         policy_0_energy = policy_0_energy.detach().cpu().numpy()

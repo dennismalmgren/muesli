@@ -38,14 +38,14 @@ import matplotlib.pyplot as plt
 import wandb
 
 class QCriticModule(nn.Module):
-    def __init__(self, observation_dim, action_dim):
+    def __init__(self, observation_dim, action_dim, num_outputs=101):
         super().__init__()
 
         self.observation_dim = observation_dim
         self.action_dim = action_dim
 
         self.input_dim = observation_dim + action_dim
-        self.output_dim = 1
+        self.output_dim = num_outputs
         self.hidden_dim = 10
 
         self.embed = nn.Linear(self.input_dim, self.hidden_dim)
@@ -131,78 +131,75 @@ def regularize_reward_energy(reward, action_i_energy, action_i_reg_energy, actio
     return reward - eta * own_policy_reward + \
                     eta * adv_policy_reward
 
-# def project_onto_simplex(a):
-#     """
-#     Projects the input 'a' onto the probability simplex (i.e., makes sure the elements sum to 1 and are >= 0).
-#     """
-#     sorted_a, _ = torch.sort(a, descending=True)
-#     cumsum = torch.cumsum(sorted_a, dim=-1) - 1
-#     rho = torch.arange(1, len(a) + 1, device=a.device).float()
-#     delta_dims = a.dim() - rho.dim()
-#     for _ in range(delta_dims):
-#         rho = rho.unsqueeze(-1) #note, this should match all dimensions of a.
-#     theta = (cumsum / rho).max(dim=-1, keepdim=True)[0]
-#     epsilon = 1e-10
-#     projected = torch.clamp(a - theta, min=epsilon)
-#     projected_sum = projected.sum(-1, keepdim=True)
-#     #projected_sum[projected_sum < epsilon] = epsilon
+def project_onto_simplex(a):
+    """
+    Projects the input 'a' onto the probability simplex (i.e., makes sure the elements sum to 1 and are >= 0).
+    """
+    sorted_a, _ = torch.sort(a, descending=True)
+    cumsum = torch.cumsum(sorted_a, dim=-1) - 1
+    rho = torch.arange(1, len(a) + 1, device=a.device).float()
+    delta_dims = a.dim() - rho.dim()
+    for _ in range(delta_dims):
+        rho = rho.unsqueeze(-1) #note, this should match all dimensions of a.
+    theta = (cumsum / rho).max(dim=-1, keepdim=True)[0]
+    epsilon = 1e-10
+    projected = torch.clamp(a - theta, min=epsilon)
+    projected_sum = projected.sum(-1, keepdim=True)
+    #projected_sum[projected_sum < epsilon] = epsilon
 
-#    return projected / projected_sum  # Ensure exact sum-to-1 constraint
-def sample_policy(policy_module, observation, x_init=None, action_dim=3, steps=10, step_size=0.01):
-    if x_init is None:
-        x_init = torch.randn((*observation.shape[:-1], action_dim), device=observation.device)
+    return projected / projected_sum  # Ensure exact sum-to-1 constraint
+
+def sample_policy(policy_module, observation, a_init = None, action_dim=3, steps=10, step_size=0.01):
+    if a_init is None:
+        a_init = torch.distributions.Dirichlet(torch.ones(3)).sample(observation.shape[:-1]).to(observation.device)
+#        a_init = torch.randn((*observation.shape[:-1], action_dim))  # Assuming zero mean and unit variance
+        # Initialize action from base distribution
     noise_factor = torch.sqrt(2 * torch.tensor(step_size)).to(observation.device)
-    x = x_init.clone()
+    a = a_init.clone()
     for _ in range(steps):
-        x.requires_grad = True
-        a = torch.softmax(x, dim=-1)
+        a.requires_grad = True
         energy = policy_module(observation, a)
-        # Adjust energy with log-det Jacobian of softmax
-        log_jacobian = -torch.sum(torch.log(a + 1e-10), dim=-1)
-        adjusted_energy = energy - log_jacobian
-        adjusted_energy = adjusted_energy.sum()
-        adjusted_energy.backward()
-        noise = torch.randn_like(x) * noise_factor
+#        grad_a = torch.autograd.grad(outputs=energy.sum(), inputs=a, create_graph=True)[0]
+
+        energy = energy.sum()
+        energy.backward()
+        noise = torch.randn_like(a) * noise_factor
         with torch.no_grad():
-            x -= step_size * x.grad
-            x += noise
-    a = torch.softmax(x, dim=-1).detach()
-    a_energy = policy_module(observation, a)
-    return a, a_energy
+            a -= step_size * a.grad
+            a += noise
+            a = project_onto_simplex(a)
 
-# def sample_policy(policy_module, observation, a_init = None, action_dim=3, steps=10, step_size=0.01):
-#     if a_init is None:
-#         a_init = torch.distributions.Dirichlet(torch.ones(3)).sample(observation.shape[:-1]).to(observation.device)
-# #        a_init = torch.randn((*observation.shape[:-1], action_dim))  # Assuming zero mean and unit variance
-#         # Initialize action from base distribution
-#     noise_factor = torch.sqrt(2 * torch.tensor(step_size)).to(observation.device)
-#     a = a_init.clone()
-#     for _ in range(steps):
-#         a.requires_grad = True
-#         energy = policy_module(observation, a)
-# #        grad_a = torch.autograd.grad(outputs=energy.sum(), inputs=a, create_graph=True)[0]
+            #a.grad.zero_()
 
-#         energy = energy.sum()
-#         energy.backward()
-#         noise = torch.randn_like(a) * noise_factor
-#         with torch.no_grad():
-#             a -= step_size * a.grad
-#             a += noise
-#             a = project_onto_simplex(a)
-
-#             #a.grad.zero_()
-
-#     a = a.detach()
-#     #a_unconstrained_energy = policy_module(observation, a_unconstrained)
+    a = a.detach()
+    #a_unconstrained_energy = policy_module(observation, a_unconstrained)
     
-#     a_energy = policy_module(observation, a)   
-#     return a, a_energy
+    a_energy = policy_module(observation, a)   
+    return a, a_energy
 
 def copy_weights(source_policy, target_policy):
     target_policy.load_state_dict(source_policy.state_dict())
+
+def project_to_support(reward, v_min, v_max, atoms, support):
+    delta_z = (v_max - v_min) / (atoms - 1)
+    stddev = (0.75 * delta_z).unsqueeze(-1)
+
+    support_plus = support + delta_z / 2
+    support_minus = support - delta_z / 2
+    reward = reward.clamp(support.min(), support.max())
+    stddev_expanded = stddev.expand_as(reward)
+    dist = torch.distributions.Normal(reward, stddev_expanded)
     
+    cdf_plus = dist.cdf(support_plus)
+    cdf_minus = dist.cdf(support_minus)
+    m = cdf_plus - cdf_minus
+    m = m / m.sum(dim=-1, keepdim=True) 
+    assert torch.allclose(m.sum(dim=-1), torch.ones_like(m.sum(dim=-1)))
+    return m
+
 def gather_qval_samples(base_env, 
                    qval_module_0, qval_module_1, 
+                   qval_support, 
                    action_dim=1,
                    n_samples=1000):
     reset_td = TensorDict({
@@ -218,8 +215,11 @@ def gather_qval_samples(base_env,
     
     sample_action = torch.distributions.Dirichlet(torch.ones(action_dim)).sample((n_samples, 1,)).to(reset_td.device)
     qval_0 = qval_module_0(td_qval["player0", "observation"], sample_action)
+    qval_0 = (qval_0.softmax(-1) * qval_support).sum(-1, keepdim=True)
+#    qval_0 = torch.dot(F.softmax(qval_0, dim=-1), qval_support)
     qval_1 = qval_module_1(td_qval["player1", "observation"], sample_action)
-
+    qval_1 = (qval_1.softmax(-1) * qval_support).sum(-1, keepdim=True)
+#    qval_1 = torch.dot(F.softmax(qval_1, dim=-1), qval_support)
     return qval_0, qval_1, sample_action
 
 def gather_samples(base_env, 
@@ -310,12 +310,11 @@ def main(cfg: "DictConfig"):  # noqa: F821
     min_energy = -100.0
     max_energy = 100.0
     num_iters = 30
-    train_iters = 10000
+    train_iters = 1000
     lr_steps = num_iters * train_iters
     policy_lr = 3e-4
-    critic_lr = 3e-3
+    critic_lr = 1e-2
     policy_sample_steps = 100
-    n_samples_per_observation = 10
 
     ref_env = ColonelBlottoParallelEnv(num_players=2, num_battlefields=3, device=device)
     env = ref_env
@@ -341,13 +340,19 @@ def main(cfg: "DictConfig"):  # noqa: F821
         critics[group] = critic_group
         critic_optimizers[group] = optim.Adam(critic_group.parameters(), weight_decay=0.0, lr=critic_lr)
 
+    v_min = torch.tensor(-2.0, device=device)
+    v_max = torch.tensor(2.0, device=device)
+    atoms = 21
+    qval_support = torch.linspace(v_min, v_max, atoms, device=device)
+
     qvals = {}
     qval_optimizers = {}
     for group, agents in ref_env.group_map.items(): 
-        critic_group = QCriticModule(1, action_dim).to(device)
+        critic_group = QCriticModule(1, action_dim, num_outputs = atoms).to(device)
         qvals[group] = critic_group
         qval_optimizers[group] = optim.Adam(critic_group.parameters(), weight_decay=0.0, lr=critic_lr)
-     
+    
+
     groups = list(ref_env.group_map.keys())
     group0 = groups[0]
     group1 = groups[1]
@@ -355,7 +360,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     action_samples_policy_0, action_samples_policy_1, policy_0_energy, policy_1_energy = \
         gather_samples(ref_env, policy_modules[group0], policy_modules[group1], 
                        1000, n_sample_steps=policy_sample_steps)
-    qval_0, qval_1, sample_action = gather_qval_samples(ref_env, qvals[group0], qvals[group1], action_dim, 1000)
+    qval_0, qval_1, sample_action = gather_qval_samples(ref_env, qvals[group0], qvals[group1], qval_support, action_dim, 1000)
     qval_0 = qval_0.detach().cpu().numpy()
     qval_1 = qval_1.detach().cpu().numpy()
     sample_action = sample_action.detach().cpu().numpy()
@@ -422,9 +427,12 @@ def main(cfg: "DictConfig"):  # noqa: F821
 
             value0 = critics[group0](observations0)
             value1 = critics[group1](observations1)
-            qvalue0 = qvals[group0](observations0, action0)
-            qvalue1 = qvals[group1](observations1, action1)
-        
+            qvalue0_hgauss = qvals[group0](observations0, action0)
+            qvalue0 = (qvalue0_hgauss.softmax(-1) * qval_support).sum(-1, keepdim=True)
+
+            qvalue1_hgauss = qvals[group1](observations1, action1)
+            qvalue1 = (qvalue1_hgauss.softmax(-1) * qval_support).sum(-1, keepdim=True)
+            
             action0_energy_max = torch.max(action0_energy, dim = 0)[0].squeeze()
             action1_energy_max = torch.max(action1_energy, dim = 0)[0].squeeze()
             action0_energy_min = torch.min(action0_energy, dim = 0)[0].squeeze()
@@ -455,12 +463,15 @@ def main(cfg: "DictConfig"):  # noqa: F821
             critic1_loss.backward()
             critic_optimizers[group1].step()
 
-            qvalue0_loss = F.mse_loss(qvalue0, reward0)
+            reward0_gauss = project_to_support(reward0, v_min, v_max, atoms, qval_support)
+            qvalue0_loss = F.cross_entropy(qvalue0_hgauss, reward0_gauss)
             qval_optimizers[group0].zero_grad()
             qvalue0_loss.backward()
             qval_optimizers[group0].step()
 
-            qvalue1_loss = F.mse_loss(qvalue1, reward1)
+
+            reward1_gauss = project_to_support(reward1, v_min, v_max, atoms, qval_support)
+            qvalue1_loss = F.cross_entropy(qvalue1_hgauss, reward1_gauss)
             qval_optimizers[group1].zero_grad()
             qvalue1_loss.backward()
             qval_optimizers[group1].step()
@@ -469,7 +480,11 @@ def main(cfg: "DictConfig"):  # noqa: F821
 
             with torch.no_grad():
                 train_qvals0 = qvals[group0](observations0, train_action0)
+                train_qvals0 = (train_qvals0.softmax(-1) * qval_support).sum(-1, keepdim=True)
+
                 train_qvals1 = qvals[group1](observations1, train_action0)
+                train_qvals1 = (train_qvals1.softmax(-1) * qval_support).sum(-1, keepdim=True)
+
                 #train_qvals0 = qvals[group0](observations0, action0)
                 #train_qvals1 = qvals[group1](observations1, action1)                
                 train_vals0 = critics[group0](observations0)
@@ -543,7 +558,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 action_samples_policy_1 = action_samples_policy_1.detach().cpu().numpy()
                 policy_0_energy = policy_0_energy.detach().cpu().numpy()
                 policy_1_energy = policy_1_energy.detach().cpu().numpy()
-                qval_0, qval_1, sample_action = gather_qval_samples(ref_env, qvals[group0], qvals[group1], action_dim, 1000)
+                qval_0, qval_1, sample_action = gather_qval_samples(ref_env, qvals[group0], qvals[group1], qval_support, action_dim, 1000)
                 qval_0 = qval_0.detach().cpu().numpy()
                 qval_1 = qval_1.detach().cpu().numpy()
                 sample_action = sample_action.detach().cpu().numpy()
@@ -564,7 +579,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
         policy_0_energy = policy_0_energy.detach().cpu().numpy()
         policy_1_energy = policy_1_energy.detach().cpu().numpy()
 
-        qval_0, qval_1, sample_action = gather_qval_samples(ref_env, qvals[group0], qvals[group1], action_dim, 1000)
+        qval_0, qval_1, sample_action = gather_qval_samples(ref_env, qvals[group0], qvals[group1], qval_support, action_dim, 1000)
         qval_0 = qval_0.detach().cpu().cpu().numpy()
         qval_1 = qval_1.detach().cpu().cpu().numpy()
         sample_action = sample_action.detach().cpu().cpu().numpy()

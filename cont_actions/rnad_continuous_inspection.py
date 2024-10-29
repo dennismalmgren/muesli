@@ -5,7 +5,8 @@ from torch import multiprocessing
 import tqdm
 from torchrl.envs.libs import PettingZooWrapper
 from envs.matching_pennies_env import MatchingPenniesEnv
-from envs.colonel_blotto_env_torchrl import ColonelBlottoParallelEnv
+from envs.continuous_inspection_env import ContinuousTimeInspectionGameParallelEnv
+
 from torchrl.envs import (
     check_env_specs,
     RewardSum,
@@ -131,72 +132,51 @@ def regularize_reward_energy(reward, action_i_energy, action_i_reg_energy, actio
     return reward - eta * own_policy_reward + \
                     eta * adv_policy_reward
 
-# def project_onto_simplex(a):
-#     """
-#     Projects the input 'a' onto the probability simplex (i.e., makes sure the elements sum to 1 and are >= 0).
-#     """
-#     sorted_a, _ = torch.sort(a, descending=True)
-#     cumsum = torch.cumsum(sorted_a, dim=-1) - 1
-#     rho = torch.arange(1, len(a) + 1, device=a.device).float()
-#     delta_dims = a.dim() - rho.dim()
-#     for _ in range(delta_dims):
-#         rho = rho.unsqueeze(-1) #note, this should match all dimensions of a.
-#     theta = (cumsum / rho).max(dim=-1, keepdim=True)[0]
-#     epsilon = 1e-10
-#     projected = torch.clamp(a - theta, min=epsilon)
-#     projected_sum = projected.sum(-1, keepdim=True)
-#     #projected_sum[projected_sum < epsilon] = epsilon
+def project_onto_simplex(a):
+    """
+    Projects the input 'a' onto the probability simplex (i.e., makes sure the elements sum to 1 and are >= 0).
+    """
+    sorted_a, _ = torch.sort(a, descending=True)
+    cumsum = torch.cumsum(sorted_a, dim=-1) - 1
+    rho = torch.arange(1, len(a) + 1, device=a.device).float()
+    delta_dims = a.dim() - rho.dim()
+    for _ in range(delta_dims):
+        rho = rho.unsqueeze(-1) #note, this should match all dimensions of a.
+    theta = (cumsum / rho).max(dim=-1, keepdim=True)[0]
+    epsilon = 1e-10
+    projected = torch.clamp(a - theta, min=epsilon)
+    projected_sum = projected.sum(-1, keepdim=True)
+    #projected_sum[projected_sum < epsilon] = epsilon
 
-#    return projected / projected_sum  # Ensure exact sum-to-1 constraint
-def sample_policy(policy_module, observation, x_init=None, action_dim=3, steps=10, step_size=0.01):
-    if x_init is None:
-        x_init = torch.randn((*observation.shape[:-1], action_dim), device=observation.device)
+    return projected / projected_sum  # Ensure exact sum-to-1 constraint
+
+def sample_policy(policy_module, observation, a_init = None, action_dim=3, steps=10, step_size=0.01):
+    if a_init is None:
+        a_init = torch.distributions.Dirichlet(torch.ones(3)).sample(observation.shape[:-1]).to(observation.device)
+#        a_init = torch.randn((*observation.shape[:-1], action_dim))  # Assuming zero mean and unit variance
+        # Initialize action from base distribution
     noise_factor = torch.sqrt(2 * torch.tensor(step_size)).to(observation.device)
-    x = x_init.clone()
+    a = a_init.clone()
     for _ in range(steps):
-        x.requires_grad = True
-        a = torch.softmax(x, dim=-1)
+        a.requires_grad = True
         energy = policy_module(observation, a)
-        # Adjust energy with log-det Jacobian of softmax
-        log_jacobian = -torch.sum(torch.log(a + 1e-10), dim=-1)
-        adjusted_energy = energy - log_jacobian
-        adjusted_energy = adjusted_energy.sum()
-        adjusted_energy.backward()
-        noise = torch.randn_like(x) * noise_factor
+#        grad_a = torch.autograd.grad(outputs=energy.sum(), inputs=a, create_graph=True)[0]
+
+        energy = energy.sum()
+        energy.backward()
+        noise = torch.randn_like(a) * noise_factor
         with torch.no_grad():
-            x -= step_size * x.grad
-            x += noise
-    a = torch.softmax(x, dim=-1).detach()
-    a_energy = policy_module(observation, a)
-    return a, a_energy
+            a -= step_size * a.grad
+            a += noise
+            a = project_onto_simplex(a)
 
-# def sample_policy(policy_module, observation, a_init = None, action_dim=3, steps=10, step_size=0.01):
-#     if a_init is None:
-#         a_init = torch.distributions.Dirichlet(torch.ones(3)).sample(observation.shape[:-1]).to(observation.device)
-# #        a_init = torch.randn((*observation.shape[:-1], action_dim))  # Assuming zero mean and unit variance
-#         # Initialize action from base distribution
-#     noise_factor = torch.sqrt(2 * torch.tensor(step_size)).to(observation.device)
-#     a = a_init.clone()
-#     for _ in range(steps):
-#         a.requires_grad = True
-#         energy = policy_module(observation, a)
-# #        grad_a = torch.autograd.grad(outputs=energy.sum(), inputs=a, create_graph=True)[0]
+            #a.grad.zero_()
 
-#         energy = energy.sum()
-#         energy.backward()
-#         noise = torch.randn_like(a) * noise_factor
-#         with torch.no_grad():
-#             a -= step_size * a.grad
-#             a += noise
-#             a = project_onto_simplex(a)
-
-#             #a.grad.zero_()
-
-#     a = a.detach()
-#     #a_unconstrained_energy = policy_module(observation, a_unconstrained)
+    a = a.detach()
+    #a_unconstrained_energy = policy_module(observation, a_unconstrained)
     
-#     a_energy = policy_module(observation, a)   
-#     return a, a_energy
+    a_energy = policy_module(observation, a)   
+    return a, a_energy
 
 def copy_weights(source_policy, target_policy):
     target_policy.load_state_dict(source_policy.state_dict())
