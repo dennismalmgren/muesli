@@ -36,6 +36,7 @@ from torchrl.envs.utils import MarlGroupMapType
 import numpy as np
 import matplotlib.pyplot as plt
 import wandb
+from torchrl.record.loggers import generate_exp_name, get_logger
 
 class QCriticModule(nn.Module):
     def __init__(self, observation_dim, action_dim):
@@ -115,7 +116,7 @@ class PolicyModule(nn.Module):
         hidden = F.elu(self.embed(input))
         hidden = F.elu(self.hidden(hidden))
         output = self.output(hidden)
-        output = torch.clamp(output, self.min_energy, self.max_energy)
+        #output = torch.clamp(output, self.min_energy, self.max_energy)
         return output
 
 def regularize_reward(reward, action_i_logprob, action_i_reg_logprob, action_adv_logprob, action_adv_reg_logprob):
@@ -148,27 +149,40 @@ def regularize_reward_energy(reward, action_i_energy, action_i_reg_energy, actio
 #     #projected_sum[projected_sum < epsilon] = epsilon
 
 #    return projected / projected_sum  # Ensure exact sum-to-1 constraint
+
+def logdet_jacobian(x_logits):
+    a_dim = x_logits.shape[-1]
+    logdet_jac = -torch.sum(x_logits, dim=-1, keepdim=True) + a_dim * torch.logsumexp(x_logits, dim=-1, keepdim=True)
+    return logdet_jac
+
+def logdet_jacobian_reg(action):
+    return -torch.sum(torch.log(action + 1e-10), dim=-1, keepdim=True)
+
+
 def sample_policy(policy_module, observation, x_init=None, action_dim=3, steps=10, step_size=0.01):
     if x_init is None:
-        x_init = torch.randn((*observation.shape[:-1], action_dim), device=observation.device)
+        x_init = torch.randn((*observation.shape[:-1], action_dim), device=observation.device) * torch.sqrt(torch.tensor(0.1, device=observation.device))
     noise_factor = torch.sqrt(2 * torch.tensor(step_size)).to(observation.device)
     x = x_init.clone()
+    a_progression = []
     for _ in range(steps):
         x.requires_grad = True
         a = torch.softmax(x, dim=-1)
+        #a_progression.append(a.detach())
         energy = policy_module(observation, a)
         # Adjust energy with log-det Jacobian of softmax
-        log_jacobian = -torch.sum(torch.log(a + 1e-10), dim=-1)
-        adjusted_energy = energy - log_jacobian
-        adjusted_energy = adjusted_energy.sum()
-        adjusted_energy.backward()
+        adjusted_energy = energy - logdet_jacobian(x)
+        adjusted_energy.backward(torch.ones_like(adjusted_energy))
         noise = torch.randn_like(x) * noise_factor
         with torch.no_grad():
             x -= step_size * x.grad
             x += noise
-    a = torch.softmax(x, dim=-1).detach()
+        policy_module.zero_grad()
+        x.grad = None
+    x = x.detach()
+    a = torch.softmax(x, dim=-1)
     a_energy = policy_module(observation, a)
-    return a, a_energy
+    return a, a_energy, x 
 
 # def sample_policy(policy_module, observation, a_init = None, action_dim=3, steps=10, step_size=0.01):
 #     if a_init is None:
@@ -236,8 +250,8 @@ def gather_samples(base_env,
                           device=base_env.device)
     td_policy = base_env.reset(reset_td)
 
-    policy_0_action, policy_0_energy = sample_policy(policy_0, td_policy["player0", "observation"], steps=n_sample_steps)
-    policy_1_action, policy_1_energy = sample_policy(policy_1, td_policy["player1", "observation"], steps=n_sample_steps)
+    policy_0_action, policy_0_energy, _ = sample_policy(policy_0, td_policy["player0", "observation"], steps=n_sample_steps)
+    policy_1_action, policy_1_energy, _ = sample_policy(policy_1, td_policy["player1", "observation"], steps=n_sample_steps)
     return policy_0_action, policy_1_action, policy_0_energy, policy_1_energy
 
 
@@ -282,8 +296,10 @@ def plot_samples(action_samples_policy_0, action_samples_policy_1,
             ax[i, j].set_aspect('equal', adjustable='box')
 
     # Scatter plot the points inside the triangle
-    ax[0, 0].scatter(points_2d_policy_0[:, 0], points_2d_policy_0[:, 1], c=norm_policy_0_energy, cmap='coolwarm', alpha=0.8)
-    ax[0, 1].scatter(points_2d_policy_1[:, 0], points_2d_policy_1[:, 1], c=norm_policy_1_energy, cmap='coolwarm', alpha=0.8)
+    ax[0, 0].scatter(points_2d_policy_0[:, 0], points_2d_policy_0[:, 1], c=policy_0_energy, cmap='coolwarm', alpha=0.8)
+    ax[0, 1].scatter(points_2d_policy_1[:, 0], points_2d_policy_1[:, 1], c=policy_1_energy, cmap='coolwarm', alpha=0.8)
+    #ax[0, 0].scatter(points_2d_policy_0[:, 0], points_2d_policy_0[:, 1], c=norm_policy_0_energy, cmap='coolwarm', alpha=0.8)
+    #ax[0, 1].scatter(points_2d_policy_1[:, 0], points_2d_policy_1[:, 1], c=norm_policy_1_energy, cmap='coolwarm', alpha=0.8)
     ax[1, 0].scatter(points_2d_qval[:, 0], points_2d_qval[:, 1], c=qval_0, cmap='coolwarm', alpha=0.8, vmin=-1.5, vmax=1.5)
     ax[1, 1].scatter(points_2d_qval[:, 0], points_2d_qval[:, 1], c=qval_1, cmap='coolwarm', alpha=0.8, vmin=-1.5, vmax=1.5)
     ax[2, 0].scatter(points_2d_qval[:, 0], points_2d_qval[:, 1], c=qval_0, cmap='coolwarm', alpha=0.8)
@@ -305,16 +321,28 @@ def main(cfg: "DictConfig"):  # noqa: F821
         if torch.cuda.is_available() and not is_fork
         else torch.device("cpu")
     )
+
+    exp_name = generate_exp_name("CB", cfg.logger.exp_name)
+    logger = None
+    if cfg.logger.backend:
+        logger = get_logger(
+            logger_type=cfg.logger.backend,
+            logger_name="cb_logging",
+            experiment_name=exp_name,
+            wandb_kwargs={"mode": cfg.logger.mode,
+                          "project": cfg.logger.project,},
+        )
+
     #device = torch.device("cpu")
     #device = torch.device("cpu")
     action_dim = 3
     num_envs_rollout = 10000
-    min_energy = -100.0
-    max_energy = 100.0
+    min_energy = -10000.0
+    max_energy = 10000.0
     num_iters = 30
-    train_iters = 10000
+    train_iters = 2000
     lr_steps = num_iters * train_iters
-    policy_lr = 3e-4
+    policy_lr = 3e-3
     critic_lr = 3e-3
     policy_sample_steps = 100
     n_samples_per_observation = 10
@@ -334,7 +362,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
         policy_reg_group = PolicyModule(1, action_dim, min_energy, max_energy).to(device)
         copy_weights(policy_group, policy_reg_group)
         policy_reg_modules[group] = policy_reg_group
-        policy_optimizers[group] = optim.Adam(policy_group.parameters(), weight_decay=0.0, lr=policy_lr)
+        #policy_optimizers[group] = optim.Adam(policy_group.parameters(), weight_decay=0.0, lr=policy_lr)
+        policy_optimizers[group] = optim.SGD(policy_group.parameters(), lr=policy_lr)
 
     critics = {}
     critic_optimizers = {}
@@ -376,6 +405,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
             copy_weights(policy_modules[group], policy_reg_modules[group])
             
         for train_iter in range(train_iters):
+            log_info = {}
             reset_td = TensorDict({
                 "player0": TensorDict({},
                               batch_size=(num_envs_rollout,)),
@@ -386,22 +416,22 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 batch_size=(num_envs_rollout,),
                 device=env.device)
             td = env.reset(reset_td)
-            action0_sampled, action0_energy = sample_policy(policy_modules[group0], td[group0]['observation'], steps=policy_sample_steps)
-            action1_sampled, action1_energy = sample_policy(policy_modules[group1], td[group1]['observation'], steps=policy_sample_steps)
-            action0_z_sampled, action0_z_energy = sample_policy(policy_modules[group0], td[group0]['observation'], steps=policy_sample_steps)
-            action1_z_sampled, action1_z_energy = sample_policy(policy_modules[group1], td[group1]['observation'], steps=policy_sample_steps)
+            action0_sampled, action0_energy, action0_logits = sample_policy(policy_modules[group0], td[group0]['observation'], steps=policy_sample_steps)
+            action1_sampled, action1_energy, action1_logits = sample_policy(policy_modules[group1], td[group1]['observation'], steps=policy_sample_steps)
+            action0_z_sampled, action0_z_energy, action0_z_logits = sample_policy(policy_modules[group0], td[group0]['observation'], steps=policy_sample_steps)
+            action1_z_sampled, action1_z_energy, action1_z_logits = sample_policy(policy_modules[group1], td[group1]['observation'], steps=policy_sample_steps)
             td[group0]["action"] = action0_sampled
-            #td[group0]["action_unconstrained"] = action0_unconstrained
+            td[group0]["action_logits"] = action0_logits
             td[group0]["action_energy"] = action0_energy
             td[group0]["z_action"] = action0_z_sampled
             td[group0]["z_action_energy"] = action0_z_energy
-            #td[group0]["z_action_unconstrained_energy"] = action0_z_unconstrained_energy
+            td[group0]["z_action_logits"] = action0_z_logits
             
             td[group1]["action"] = action1_sampled
             td[group1]["action_energy"] = action1_energy
-            #td[group1]["action_unconstrained_energy"] = action1_unconstrained_energy
+            td[group1]["action_logits"] = action1_logits
             td[group1]["z_action"] = action1_z_sampled
-            #td[group1]["z_action_unconstrained"] = action1_z_unconstrained
+            td[group1]["z_action_logits"] = action1_z_logits
             td[group1]["z_action_energy"] = action1_z_energy
 
             td = env.step(td)           
@@ -416,6 +446,12 @@ def main(cfg: "DictConfig"):  # noqa: F821
             action1 = td[group1, 'action']
             action0_z = td[group0, 'z_action']
             action1_z = td[group1, 'z_action']
+            action0_logits = td[group0, 'action_logits']
+            action1_logits = td[group1, 'action_logits']
+            action0_z_logits = td[group0, 'z_action_logits']
+            action1_z_logits = td[group1, 'z_action_logits']
+            log_info["player0/reward"] = reward0_game.mean()
+            log_info["player0/reward"] = reward1_game.mean()
             
             #action0_unconstrained = td[group0, 'action_unconstrained']
             #action1_unconstrained = td[group1, 'action_unconstrained']
@@ -433,49 +469,54 @@ def main(cfg: "DictConfig"):  # noqa: F821
             action1_energy_min = torch.min(action1_energy, dim = 0)[0].squeeze()
 
             with torch.no_grad():
-                energy0 = policy_modules[group0](observations0, action0)
-                reg_energy0 = policy_reg_modules[group0](observations0, action0)
-                energy0_z = policy_modules[group0](observations0, action0_z)
-                reg_energy0_z = policy_reg_modules[group0](observations0, action0_z)
+                energy0 = policy_modules[group0](observations0, action0) #- logdet_jacobian(action0_logits)
+                reg_energy0 = policy_reg_modules[group0](observations0, action0) #- logdet_jacobian(action0_logits)
+                energy0_z = policy_modules[group0](observations0, action0_z) #- logdet_jacobian(action0_z_logits)
+                reg_energy0_z = policy_reg_modules[group0](observations0, action0_z) #- logdet_jacobian(action0_z_logits)
 
-                energy1 = policy_modules[group1](observations1, action1)                 
-                reg_energy1 = policy_reg_modules[group1](observations1, action1)
-                energy1_z = policy_modules[group1](observations1, action1_z)
-                reg_energy1_z = policy_reg_modules[group1](observations1, action1_z)
-
-                reward0 = regularize_reward_energy(reward0_game, energy0, reg_energy0, energy1, reg_energy1, energy0_z, reg_energy0_z, energy1_z, reg_energy1_z)
-                reward1 = regularize_reward_energy(reward1_game, energy1, reg_energy1, energy0, reg_energy0, energy1_z, reg_energy1_z, energy0_z, reg_energy0_z)
+                energy1 = policy_modules[group1](observations1, action1) #- logdet_jacobian(action1_logits)         
+                reg_energy1 = policy_reg_modules[group1](observations1, action1) #- logdet_jacobian(action1_logits) 
+                energy1_z = policy_modules[group1](observations1, action1_z) #- logdet_jacobian(action1_z_logits)
+                reg_energy1_z = policy_reg_modules[group1](observations1, action1_z) #- logdet_jacobian(action1_z_logits) 
+                if train_iter < 201 and fix_iter == 0:
+                    reward0 = regularize_reward_energy(reward0_game, energy0, reg_energy0, energy1, reg_energy1, energy0_z, reg_energy0_z, energy1_z, reg_energy1_z)
+                    reward1 = regularize_reward_energy(reward1_game, energy1, reg_energy1, energy0, reg_energy0, energy1_z, reg_energy1_z, energy0_z, reg_energy0_z)
+            log_info["player0/regularized_reward"] = reward0.mean()
+            log_info["player0/regularized_reward"] = reward1.mean()
 
             #Train critics
             critic0_loss = F.mse_loss(value0, reward0)
+            log_info["player0/critic_loss"] = critic0_loss
             critic_optimizers[group0].zero_grad()
             critic0_loss.backward()
             critic_optimizers[group0].step()
             
             critic1_loss = F.mse_loss(value1, reward1)
+            log_info["player1/critic_loss"] = critic1_loss
             critic_optimizers[group1].zero_grad()
             critic1_loss.backward()
             critic_optimizers[group1].step()
+            if train_iter < 201 and fix_iter == 0:
+                qvalue0_loss = F.mse_loss(qvalue0, reward0)
+                qval_optimizers[group0].zero_grad()
+                qvalue0_loss.backward()
+                qval_optimizers[group0].step()
 
-            qvalue0_loss = F.mse_loss(qvalue0, reward0)
-            qval_optimizers[group0].zero_grad()
-            qvalue0_loss.backward()
-            qval_optimizers[group0].step()
-
-            qvalue1_loss = F.mse_loss(qvalue1, reward1)
-            qval_optimizers[group1].zero_grad()
-            qvalue1_loss.backward()
-            qval_optimizers[group1].step()
+                qvalue1_loss = F.mse_loss(qvalue1, reward1)
+                qval_optimizers[group1].zero_grad()
+                qvalue1_loss.backward()
+                qval_optimizers[group1].step()
 
             train_action0 = torch.distributions.Dirichlet(torch.ones(action_dim)).sample((num_envs_rollout,1,)).to(observations0.device)
+            train_action1 = torch.distributions.Dirichlet(torch.ones(action_dim)).sample((num_envs_rollout,1,)).to(observations0.device)
 
             with torch.no_grad():
                 train_qvals0 = qvals[group0](observations0, train_action0)
                 train_qvals1 = qvals[group1](observations1, train_action0)
                 #train_qvals0 = qvals[group0](observations0, action0)
                 #train_qvals1 = qvals[group1](observations1, action1)                
-                train_vals0 = critics[group0](observations0)
-                train_vals1 = critics[group1](observations1)
+                #train_vals0 = critics[group0](observations0)
+                #train_vals1 = critics[group1](observations1)
 
                 advantages0 = train_qvals0# - train_vals0
                 advantages1 = train_qvals1# - train_vals1
@@ -486,8 +527,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 #expectation_advantages1 = expectation_qvals1 - train_vals1
                 
 
-            train_energy0 = policy_modules[group0](observations0, train_action0)
-            train_energy1 = policy_modules[group1](observations1, train_action0)   
+            train_energy0 = policy_modules[group0](observations0, train_action0) #- logdet_jacobian_reg(train_action0) 
+            train_energy1 = policy_modules[group1](observations1, train_action0) #- logdet_jacobian_reg(train_action1)   
 #            train_energy0 = policy_modules[group0](observations0, action0)
 #            train_energy1 = policy_modules[group1](observations1, action1)        
             #expectation_energy0 = policy_modules[group0](observations0, expectation_action0)
@@ -508,7 +549,12 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 indicator_increase0 = (train_energy0 < max_energy)
                 negative_advantages0 = torch.clip(advantages0, max=0.0)
                 positive_advantages0 = torch.clip(advantages0, min=0.0)
-                indicator_advantages0 = indicator_decrease0 * positive_advantages0 + indicator_increase0 * negative_advantages0
+                positive_samples = torch.count_nonzero(positive_advantages0)
+                negative_samples = torch.count_nonzero(negative_advantages0)
+                prop_positive = positive_samples / (positive_samples + negative_samples)
+                prop_negative = negative_samples / (positive_samples + negative_samples)
+                #indicator_advantages0 = indicator_decrease0 * positive_advantages0 + indicator_increase0 * negative_advantages0
+                indicator_advantages0 = 2*prop_negative * indicator_decrease0 * positive_advantages0 + 2*prop_positive * indicator_increase0 * negative_advantages0
                 #indicator_expectation_advantages0 = (indicator_decrease0 | indicator_increase0) * expectation_advantages0
                 
                 indicator_decrease1 = (train_energy1 > min_energy)
@@ -519,19 +565,23 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 #indicator_expectation_advantages1 = (indicator_decrease1 | indicator_increase1) * expectation_advantages1
 
             #0.5 is due to importance weight of uniform sampling from 3-d simplex
-            policy0_loss = 0.5 * torch.mean(train_energy0 * indicator_advantages0) + 0.01 * torch.square(torch.mean(train_energy0))#how do we construct the policy loss?
+            policy0_loss = 0.5 * torch.mean(train_energy0 * indicator_advantages0) + 0.001 * torch.square(torch.mean(train_energy0))#how do we construct the policy loss?
+            log_info["player0/policy_loss"] = policy0_loss
             policy_optimizers[group0].zero_grad()
             policy0_loss.backward()
             policy_optimizers[group0].step()
             #0.5 is due to importance weight of uniform sampling from 3-d simplex
 
-            policy1_loss = 0.5 * torch.mean(train_energy1 * indicator_advantages1) + 0.01 * torch.square(torch.mean(train_energy1))
+            policy1_loss = 0.5 * torch.mean(train_energy1 * indicator_advantages1) + 0.001 * torch.square(torch.mean(train_energy1))
             #policy1_loss = 0.5 * torch.mean(train_energy1 * indicator_advantages1 - expectation_energy1 * indicator_expectation_advantages1)
             #policy1_loss = torch.mean(torch.exp(action1_logprob) * advantages1)
+            log_info["player1/policy_loss"] = policy1_loss
             policy_optimizers[group1].zero_grad()
             policy1_loss.backward()
             policy_optimizers[group1].step()
-
+            if logger:
+                for key, value in log_info.items():
+                    logger.log_scalar(key, value, train_iter + fix_iter * train_iters)  
             if train_iter % 10 == 0:
                 print(f"Fix iter: {fix_iter}, train iter: {train_iter}, policy_0_loss: {policy0_loss.item()}, policy_1_loss: {policy1_loss.item()}")
                 print(f"Policy 0 energy min: {action0_energy_min}, policy 0 energy max: {action0_energy_max}")
@@ -539,11 +589,13 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 print(f"Mean critic prediction policy 0: {value0.mean()} mean reward: {reward0_game.mean()}, mean regularized reward: {reward0.mean()}")
                 print(f"Mean critic prediction policy 1: {value1.mean()} mean reward: {reward1_game.mean()}, mean regularized reward: {reward1.mean()}")
 
-            if train_iter % 500 == 0:
+            if train_iter % 50 == 0:
                 action_samples_policy_0, action_samples_policy_1, policy_0_energy, policy_1_energy = gather_samples(ref_env, policy_modules[group0], policy_modules[group1], 1000, n_sample_steps=policy_sample_steps)
-                action_samples_policy_0 = action_samples_policy_0.detach().cpu().numpy()
+#                action_samples_policy_0 = action_samples_policy_0.detach().cpu().numpy()
                 action_samples_policy_1 = action_samples_policy_1.detach().cpu().numpy()
-                policy_0_energy = policy_0_energy.detach().cpu().numpy()
+                action_samples_policy_0 = train_action0.detach().cpu().numpy()
+#                policy_0_energy = policy_0_energy.detach().cpu().numpy()
+                policy_0_energy = train_energy0.detach().cpu().numpy()
                 policy_1_energy = policy_1_energy.detach().cpu().numpy()
                 qval_0, qval_1, sample_action = gather_qval_samples(ref_env, qvals[group0], qvals[group1], action_dim, 1000)
                 qval_0 = qval_0.detach().cpu().numpy()
