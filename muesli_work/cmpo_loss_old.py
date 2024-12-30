@@ -212,7 +212,7 @@ class CMPOLoss(PPOLoss):
         separate_losses: bool = False,
         reduction: str = None,
         clip_value: bool | float | None = None,
-        #use_targets: bool = True,
+        use_targets: bool = True,
         **kwargs,
     ):
         # Define clipping of the value loss
@@ -299,35 +299,34 @@ class CMPOLoss(PPOLoss):
         gain = log_weight.exp() * advantage
 
 
-        with torch.no_grad():
-            z_cmpo_td = tensordict.clone(False)
-            prior_actions = z_cmpo_td["sampled_actions"]
-            N = prior_actions.shape[1]
+        #with torch.no_grad():
+        z_cmpo_td = tensordict.clone(False)
+        prior_actions = z_cmpo_td["sampled_actions"]
+        N = prior_actions.shape[1]
 
-            z_cmpo_td['observation'] = z_cmpo_td['observation'].unsqueeze(-2).expand(-1, N, -1)
-            #predicted_rewards = self.reward_network.module(z_cmpo_td['observation'], prior_actions)
+        # z_cmpo_td['observation'] = z_cmpo_td['observation'].unsqueeze(-2).expand(-1, N, -1)
+        # predicted_rewards = self.reward_network.module(z_cmpo_td['observation'], prior_actions)
 
-            #z_cmpo_td['next', 'observation'] = z_cmpo_td['next', 'observation'].unsqueeze(-2).expand(-1, N, -1)
+        # z_cmpo_td['next', 'observation'] = z_cmpo_td['next', 'observation'].unsqueeze(-2).expand(-1, N, -1)
 
-            #predicted_values = self.critic_network.module(z_cmpo_td['next', 'observation'])
-            #terminateds = z_cmpo_td['next', 'terminated']
-            #predicted_qvalues = predicted_rewards + 0.99 * predicted_values * (1 - terminateds.unsqueeze(-1).float())
-            #values = self.critic_network.module(z_cmpo_td['observation'])
-            #cmpo_advantages = predicted_qvalues - values
-            #cmpo_loc = cmpo_advantages.mean(dim=1, keepdim=True)
-            #cmpo_scale = cmpo_advantages.std(dim=1, keepdim=True).clamp_min(1e-6)
-            #cmpo_advantages = (cmpo_advantages - cmpo_loc) / cmpo_scale
-            #cmpo_advantages = cmpo_advantages + 0.02 * torch.rand_like(cmpo_advantages) - 0.01
-            #cmpo_advantages = torch.clip(cmpo_advantages, torch.tensor(-1.0, device=cmpo_advantages.device), torch.tensor(1.0, device=cmpo_advantages.device))
-            #cmpo_advantages = torch.exp(cmpo_advantages)
-            #z_cmpo = (1 + torch.sum(cmpo_advantages, dim=1, keepdim=True) - cmpo_advantages) / N
-            #z_cmpo_td["loc"] = z_cmpo_td["loc"].unsqueeze(-2)
-            #z_cmpo_td["scale"] = z_cmpo_td["scale"].unsqueeze(-2)
+        # predicted_values = self.critic_network.module(z_cmpo_td['next', 'observation'])
+        # terminateds = z_cmpo_td['next', 'terminated']
+        # predicted_qvalues = predicted_rewards + 0.99 * predicted_values * (1 - terminateds.unsqueeze(-1).float())
+        # values = self.critic_network.module(z_cmpo_td['observation'])
+        # cmpo_advantages = predicted_qvalues - values
+        # cmpo_loc = cmpo_advantages.mean(dim=1, keepdim=True)
+        # cmpo_scale = cmpo_advantages.std(dim=1, keepdim=True).clamp_min(1e-6)
+        # cmpo_advantages = (cmpo_advantages - cmpo_loc) / cmpo_scale
+        # #cmpo_advantages = cmpo_advantages + 0.02 * torch.rand_like(cmpo_advantages) - 0.01
+        # cmpo_advantages = torch.clip(cmpo_advantages, torch.tensor(-1.0, device=cmpo_advantages.device), torch.tensor(1.0, device=cmpo_advantages.device))
+        # cmpo_advantages = torch.exp(cmpo_advantages)
+        # z_cmpo = (1 + torch.sum(cmpo_advantages, dim=1, keepdim=True) - cmpo_advantages) / N
+        z_cmpo_td["loc"] = z_cmpo_td["loc"].unsqueeze(-2).expand(-1, N, -1)
+        z_cmpo_td["scale"] = z_cmpo_td["scale"].unsqueeze(-2).expand(-1, N, -1)
         dist = self.actor_network.get_dist(z_cmpo_td)
-        dlp = dist.log_prob(prior_actions).unsqueeze(-1)
+
             #now it's B x 16
-        regularization = -tensordict["cmpo_regularization"] * dlp
-        #regularization = -cmpo_advantages / z_cmpo * dist.log_prob(prior_actions).unsqueeze(-1)
+        regularization = -tensordict["cmpo_regularization"] * dist.log_prob(prior_actions).unsqueeze(-1)
         regularization = regularization.mean(dim=1)
         #regularization = -torch.exp(regularization) / z_cmpo * dist.log_prob(tensordict['action']).unsqueeze(-1)
         

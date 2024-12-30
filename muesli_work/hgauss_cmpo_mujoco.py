@@ -35,6 +35,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     from vtrace import VTrace
     from retrace import ReTrace
     from torchrl.objectives.value.functional import vtrace_advantage_estimate
+    from torchrl.objectives.utils import SoftUpdate
 
     device = "cpu" if not torch.cuda.device_count() else "cuda"
     num_mini_batches = cfg.collector.frames_per_batch // cfg.loss.mini_batch_size
@@ -68,12 +69,13 @@ def main(cfg: "DictConfig"):  # noqa: F821
     )
 
     # Create loss and adv modules
-    # estimator = GAE(
-    #     gamma=cfg.loss.gamma,
-    #     lmbda=cfg.loss.gae_lambda,
-    #     value_network=critic,
-    #     average_gae=True,
-    # )
+    estimator = GAE(
+        gamma=cfg.loss.gamma,
+        lmbda=cfg.loss.gae_lambda,
+        value_network=critic,
+        average_gae=True,
+    )
+
 
     loss_module = HGaussCMPOLoss(
         actor_network=actor,
@@ -87,6 +89,15 @@ def main(cfg: "DictConfig"):  # noqa: F821
         normalize_advantage=False,
         support=support
     )
+
+    estimator = VTrace(
+        gamma = cfg.loss.gamma,
+        value_network=loss_module.critic_network,
+        actor_network=loss_module.actor_network,
+        average_adv=True,
+        device=loss_module._default_device)
+    
+    target_net_updater = SoftUpdate(loss_module, tau=0.01)
 
     # Create optimizers
     actor_optim = torch.optim.Adam(actor.parameters(), lr=cfg.optim.lr, eps=1e-5)
@@ -137,11 +148,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     cfg_logger_test_interval = cfg.logger.test_interval
     cfg_logger_num_test_episodes = cfg.logger.num_test_episodes
     losses = TensorDict(batch_size=[cfg_loss_ppo_epochs, num_mini_batches])
-    # estimator = ReTrace(gamma = 0.99,
-    #                    value_network=critic,
-    #                    actor_network=actor,
-    #                    average_adv=True)
-    
+
     for i, data in enumerate(collector):
 
         log_info = {}
@@ -162,9 +169,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 }
             )
 
-        training_start = time.time()
-        N = 24
-        
+        training_start = time.time()        
         for j in range(cfg_loss_ppo_epochs):
           
             # with torch.no_grad():
@@ -176,6 +181,9 @@ def main(cfg: "DictConfig"):  # noqa: F821
             # else:
             #     with torch.no_grad():
             #         data = adv_module(data)
+            # with torch.no_grad():
+            #     data = estimator(data)
+
             data_reshape = data.reshape(-1)
             # Compute reward prediction
 
@@ -215,15 +223,15 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 actor_loss.backward()
                 actor_grad = torch.nn.utils.clip_grad_norm_(actor.parameters(), 1.0)
                 actor_optim.step()
-                if j == cfg_loss_ppo_epochs - 1:
-                    critic_loss.backward()
-                    reward_predictor_loss.backward()
-                    reward_grad = torch.nn.utils.clip_grad_norm_(reward_predictor.parameters(), 1.0)
-                    critic_grad = torch.nn.utils.clip_grad_norm_(critic.parameters(), 1.0)
+                critic_loss.backward()
+                reward_predictor_loss.backward()
+                reward_grad = torch.nn.utils.clip_grad_norm_(reward_predictor.parameters(), 1.0)
+                critic_grad = torch.nn.utils.clip_grad_norm_(critic.parameters(), 1.0)
 
-                    # Update the networks
-                    critic_optim.step()
-                    reward_predictor_optim.step()
+                # Update the networks
+                critic_optim.step()
+                reward_predictor_optim.step()
+                target_net_updater.step()
 
         # Get training losses and times
         training_time = time.time() - training_start

@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import contextlib
@@ -6,7 +5,6 @@ import contextlib
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Tuple
-from torchrl.modules import TanhNormal
 
 import torch
 from tensordict import (
@@ -44,11 +42,9 @@ from torchrl.objectives.value import (
     TDLambdaEstimator,
     VTrace,
 )
+from torchrl.objectives import PPOLoss
 
-from torchrl.objectives.ppo import PPOLoss
-from dataclasses import dataclass
-
-class CMPOLoss(PPOLoss):
+class RSClipPPOLoss(PPOLoss):
     """Clipped PPO loss.
 
     The clipped importance weighted loss is computed as follows:
@@ -149,43 +145,6 @@ class CMPOLoss(PPOLoss):
       This will work regardless of whether separate_losses is activated or not.
 
     """
-    @dataclass
-    class _AcceptedKeys:
-        """Maintains default values for all configurable tensordict keys.
-
-        This class defines which tensordict keys can be set using '.set_keys(key_name=key_value)' and their
-        default values
-
-        Attributes:
-            advantage (NestedKey): The input tensordict key where the advantage is expected.
-                Will be used for the underlying value estimator. Defaults to ``"advantage"``.
-            value_target (NestedKey): The input tensordict key where the target state value is expected.
-                Will be used for the underlying value estimator Defaults to ``"value_target"``.
-            value (NestedKey): The input tensordict key where the state value is expected.
-                Will be used for the underlying value estimator. Defaults to ``"state_value"``.
-            sample_log_prob (NestedKey): The input tensordict key where the
-               sample log probability is expected.  Defaults to ``"sample_log_prob"``.
-            action (NestedKey): The input tensordict key where the action is expected.
-                Defaults to ``"action"``.
-            reward (NestedKey): The input tensordict key where the reward is expected.
-                Will be used for the underlying value estimator. Defaults to ``"reward"``.
-            done (NestedKey): The key in the input TensorDict that indicates
-                whether a trajectory is done. Will be used for the underlying value estimator.
-                Defaults to ``"done"``.
-            terminated (NestedKey): The key in the input TensorDict that indicates
-                whether a trajectory is terminated. Will be used for the underlying value estimator.
-                Defaults to ``"terminated"``.
-        """
-
-        advantage: NestedKey = "advantage"
-        value_target: NestedKey = "value_target"
-        value: NestedKey = "state_value"
-        sample_log_prob: NestedKey = "sample_log_prob"
-        action: NestedKey = "action"
-        reward: NestedKey = "reward"
-        done: NestedKey = "done"
-        terminated: NestedKey = "terminated"
-        reward_value: NestedKey = "reward_value"
 
     actor_network: TensorDictModule
     critic_network: TensorDictModule
@@ -198,28 +157,27 @@ class CMPOLoss(PPOLoss):
         self,
         actor_network: ProbabilisticTensorDictSequential | None = None,
         critic_network: TensorDictModule | None = None,
-        reward_network: TensorDictModule | None = None,
+        support: torch.Tensor = None,
         *,
         clip_epsilon: float = 0.2,
         entropy_bonus: bool = True,
         samples_mc_entropy: int = 1,
         entropy_coef: float = 0.01,
         critic_coef: float = 1.0,
-        reward_coef: float = 1.0,
         loss_critic_type: str = "smooth_l1",
         normalize_advantage: bool = False,
         gamma: float = None,
         separate_losses: bool = False,
         reduction: str = None,
         clip_value: bool | float | None = None,
-        #use_targets: bool = True,
+        eta: float | None = None,
         **kwargs,
     ):
         # Define clipping of the value loss
         if isinstance(clip_value, bool):
             clip_value = clip_epsilon if clip_value else None
 
-        super().__init__(
+        super(RSClipPPOLoss, self).__init__(
             actor_network,
             critic_network,
             entropy_bonus=entropy_bonus,
@@ -234,15 +192,30 @@ class CMPOLoss(PPOLoss):
             clip_value=clip_value,
             **kwargs,
         )
-        self.reward_network = reward_network
-        self.reward_coef = reward_coef
-
         for p in self.parameters():
             device = p.device
             break
         else:
             device = None
         self.register_buffer("clip_epsilon", torch.tensor(clip_epsilon, device=device))
+        self.eta = eta
+
+        self.register_buffer("support", support.to(device))
+        atoms = self.support.numel()
+        Vmin = self.support.min()
+        Vmax = self.support.max()
+        delta_z = (Vmax - Vmin) / (atoms - 1)
+        self.register_buffer(
+            "stddev", (0.75 * delta_z).unsqueeze(-1)
+        )
+        self.register_buffer(
+            "support_plus",
+            self.support + delta_z / 2
+        )
+        self.register_buffer(
+            "support_minus",
+            self.support - delta_z / 2
+        )
 
     @property
     def _clip_bounds(self):
@@ -262,7 +235,6 @@ class CMPOLoss(PPOLoss):
             if self.clip_value:
                 keys.append("value_clip_fraction")
             keys.append("ESS")
-
             self._out_keys = keys
         return self._out_keys
 
@@ -273,6 +245,12 @@ class CMPOLoss(PPOLoss):
     @dispatch
     def forward(self, tensordict: TensorDictBase) -> TensorDictBase:
         tensordict = tensordict.clone(False)
+     
+        #should be N x 1
+        #now sort the trajectories based on their final reward.
+        weight = tensordict["rs_weight"]
+        #normalize
+        #weight = weight / torch.sum(weight) * weight.numel()
         advantage = tensordict.get(self.tensor_keys.advantage, None)
         if advantage is None:
             self.value_estimator(
@@ -296,59 +274,23 @@ class CMPOLoss(PPOLoss):
             ess = (2 * lw.logsumexp(0) - (2 * lw).logsumexp(0)).exp()
             batch = log_weight.shape[0]
 
-        gain = log_weight.exp() * advantage
+        gain1 = log_weight.exp() * advantage
 
+        log_weight_clip = log_weight.clamp(*self._clip_bounds)
+        clip_fraction = (log_weight_clip != log_weight).to(log_weight.dtype).mean()
+        ratio = log_weight_clip.exp()
+        gain2 = ratio * advantage
 
-        with torch.no_grad():
-            z_cmpo_td = tensordict.clone(False)
-            prior_actions = z_cmpo_td["sampled_actions"]
-            N = prior_actions.shape[1]
-
-            z_cmpo_td['observation'] = z_cmpo_td['observation'].unsqueeze(-2).expand(-1, N, -1)
-            #predicted_rewards = self.reward_network.module(z_cmpo_td['observation'], prior_actions)
-
-            #z_cmpo_td['next', 'observation'] = z_cmpo_td['next', 'observation'].unsqueeze(-2).expand(-1, N, -1)
-
-            #predicted_values = self.critic_network.module(z_cmpo_td['next', 'observation'])
-            #terminateds = z_cmpo_td['next', 'terminated']
-            #predicted_qvalues = predicted_rewards + 0.99 * predicted_values * (1 - terminateds.unsqueeze(-1).float())
-            #values = self.critic_network.module(z_cmpo_td['observation'])
-            #cmpo_advantages = predicted_qvalues - values
-            #cmpo_loc = cmpo_advantages.mean(dim=1, keepdim=True)
-            #cmpo_scale = cmpo_advantages.std(dim=1, keepdim=True).clamp_min(1e-6)
-            #cmpo_advantages = (cmpo_advantages - cmpo_loc) / cmpo_scale
-            #cmpo_advantages = cmpo_advantages + 0.02 * torch.rand_like(cmpo_advantages) - 0.01
-            #cmpo_advantages = torch.clip(cmpo_advantages, torch.tensor(-1.0, device=cmpo_advantages.device), torch.tensor(1.0, device=cmpo_advantages.device))
-            #cmpo_advantages = torch.exp(cmpo_advantages)
-            #z_cmpo = (1 + torch.sum(cmpo_advantages, dim=1, keepdim=True) - cmpo_advantages) / N
-            #z_cmpo_td["loc"] = z_cmpo_td["loc"].unsqueeze(-2)
-            #z_cmpo_td["scale"] = z_cmpo_td["scale"].unsqueeze(-2)
-        dist = self.actor_network.get_dist(z_cmpo_td)
-        dlp = dist.log_prob(prior_actions).unsqueeze(-1)
-            #now it's B x 16
-        regularization = -tensordict["cmpo_regularization"] * dlp
-        #regularization = -cmpo_advantages / z_cmpo * dist.log_prob(prior_actions).unsqueeze(-1)
-        regularization = regularization.mean(dim=1)
-        #regularization = -torch.exp(regularization) / z_cmpo * dist.log_prob(tensordict['action']).unsqueeze(-1)
-        
-        #log_weight_clip = log_weight.clamp(*self._clip_bounds)
-        #clip_fraction = (log_weight_clip != log_weight).to(log_weight.dtype).mean()
-        #ratio = log_weight_clip.exp()
-        #gain2 = ratio * advantage
-
-        #gain = torch.stack([gain1, gain2], -1).min(dim=-1)[0]
+        gain = torch.stack([gain1, gain2], -1).min(dim=-1)[0]
+        gain = weight * gain
         td_out = TensorDict({"loss_objective": -gain}, batch_size=[])
-        #td_out.set("clip_fraction", clip_fraction)
-        td_out.set("loss_regularization", regularization)
+        td_out.set("clip_fraction", clip_fraction)
+
         if self.entropy_bonus:
             entropy = self.get_entropy_bonus(dist)
             td_out.set("entropy", entropy.detach().mean())  # for logging
             td_out.set("kl_approx", kl_approx.detach().mean())  # for logging
             td_out.set("loss_entropy", -self.entropy_coef * entropy)
-        if self.reward_coef is not None:
-            loss_reward_predictor = self.loss_reward_predictor(tensordict)
-            td_out.set("loss_reward_predictor", loss_reward_predictor)
-
         if self.critic_coef is not None:
             loss_critic, value_clip_fraction = self.loss_critic(tensordict)
             td_out.set("loss_critic", loss_critic)
@@ -363,13 +305,80 @@ class CMPOLoss(PPOLoss):
             batch_size=[],
         )
         return td_out
+    
+    def loss_critic(self, tensordict: TensorDictBase) -> torch.Tensor:
+        """Returns the critic loss multiplied by ``critic_coef``, if it is not ``None``."""
+        # TODO: if the advantage is gathered by forward, this introduces an
+        # overhead that we could easily reduce.
+        # if self.separate_losses:
+        #     tensordict = tensordict.detach()
+        target_return = tensordict.get(
+            self.tensor_keys.value_target, None
+        )  # TODO: None soon to be removed
+        if target_return is None:
+            raise KeyError(
+                f"the key {self.tensor_keys.value_target} was not found in the input tensordict. "
+                f"Make sure you provided the right key and the value_target (i.e. the target "
+                f"return) has been retrieved accordingly. Advantage classes such as GAE, "
+                f"TDLambdaEstimate and TDEstimate all return a 'value_target' entry that "
+                f"can be used for the value loss."
+            )
 
-    def loss_reward_predictor(self, tensordict):
-        target_reward = tensordict.get(("next", self.tensor_keys.reward), None)
-        reward_predictor_td = self.reward_network(tensordict)
+        # if self.clip_value:
+        #     old_state_value = tensordict.get(
+        #         self.tensor_keys.value, None
+        #     )  # TODO: None soon to be removed
+        #     if old_state_value is None:
+        #         raise KeyError(
+        #             f"clip_value is set to {self.clip_value}, but "
+        #             f"the key {self.tensor_keys.value} was not found in the input tensordict. "
+        #             f"Make sure that the value_key passed to PPO exists in the input tensordict."
+        #         )
 
-        reward_prediction = reward_predictor_td.get(self.tensor_keys.reward_value)
-        loss_reward_value = distance_loss(reward_prediction, target_reward, 
-                                          loss_function="l2")
-        return loss_reward_value
+        with self.critic_network_params.to_module(
+            self.critic_network
+        ) if self.functional else contextlib.nullcontext():
+            state_value_td = self.critic_network(tensordict)
+
+        state_value = state_value_td.get(
+            self.tensor_keys.value, None
+        )  # TODO: None soon to be removed
+        state_value_logits = state_value_td.get("state_value_logits")
+
+        if state_value is None:
+            raise KeyError(
+                f"the key {self.tensor_keys.value} was not found in the critic output tensordict. "
+                f"Make sure that the value_key passed to PPO is accurate."
+            )
+
+        target_return_logits = self.construct_gauss_dist(target_return)
+        loss_value = torch.nn.functional.cross_entropy(state_value_logits, target_return_logits, reduction="none")
+
+        clip_fraction = None
+        # if self.clip_value:
+        #     loss_value, clip_fraction = _clip_value_loss(
+        #         old_state_value,
+        #         state_value,
+        #         self.clip_value.to(state_value.device),
+        #         target_return,
+        #         loss_value,
+        #         self.loss_critic_type,
+        #     )
+
+        if self.critic_coef is not None:
+            return self.critic_coef * loss_value, clip_fraction
+        return loss_value, clip_fraction
+
+    def construct_gauss_dist(self, loc):
+        loc = loc.clamp(self.support.min(), self.support.max())
+        stddev_expanded = self.stddev.expand_as(loc)
+        dist = torch.distributions.Normal(loc, stddev_expanded)
+        cdf_plus = dist.cdf(self.support_plus)
+        cdf_minus = dist.cdf(self.support_minus)
+        m = cdf_plus - cdf_minus
+            #m[..., 0] = cdf_plus[..., 0]
+            #m[..., -1] = 1 - cdf_minus[..., -1]
+        m = m / m.sum(dim=-1, keepdim=True)  #this should be handled differently. check the paper
+        assert torch.allclose(m.sum(dim=-1), torch.ones_like(m.sum(dim=-1)))
+        return m
     

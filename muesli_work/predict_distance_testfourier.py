@@ -3,41 +3,24 @@ import math
 import torch
 import matplotlib.pyplot as plt
 
-def givens_rotation(dim, p, q, theta):
-    G = torch.eye(dim, dtype=torch.complex64)
-    c = torch.cos(theta)
-    s = torch.sin(theta)
-    G[p, p] = c
-    G[p, q] = -s
-    G[q, p] = s
-    G[q, q] = c
-    return G
+num_wave_angles = 3
+wave_length_stddev = 0.5 #single "scale"
+R = 2000
+dim = 2
 
-def diagonal_phase(dim, phases):
-    D = torch.eye(dim, dtype=torch.complex64)
-    for idx, ph in enumerate(phases):
-        D[idx, idx] = torch.exp(1j * ph)
-    return D
+wavelengths = torch.randn((R, dim)) * wave_length_stddev **2 + torch.zeros((R, dim))
+wavelengths = wavelengths.sort(dim=0)[0]
+wavelengths = wavelengths.unsqueeze(-2).repeat(1, num_wave_angles, 1)
+b_initial = torch.rand((R, 1, 1)) * 2 * torch.pi
+b_initial = b_initial.sort(dim=0)[0]
+b = b_initial + (torch.arange(num_wave_angles) / num_wave_angles).unsqueeze(-1).unsqueeze(0) * 2 * torch.pi  
+b = b % (2 * torch.pi)
+b_elem_sorted = b.sort(dim=1)[0]
+_, b_elem_indices = torch.sort(b_elem_sorted[:, 0], dim=0)
+b = b_elem_sorted[b_elem_indices.squeeze()]
 
-def generate_one_unitary_matrix(dim=3, N=1):
-    """
-    Generate a single unitary (3x3) matrix deterministically.
-    By default N=1, but we add a constant offset to the angles so that 
-    even when i=0 and N=1, we don't end up with the identity matrix.
-    """
-    i = 0  # Only one matrix
-    # Adding a small offset (like pi/4) ensures a non-trivial matrix.
-    theta = torch.tensor(2 * math.pi * i / N + math.pi/4)
-    phi   = torch.tensor(math.pi * i / N + math.pi/4)
-    psi1  = torch.tensor(2 * math.pi * i / N + math.pi/4)
-    psi2  = torch.tensor(math.pi * i / (2 * N) + math.pi/4)
-    psi3  = torch.tensor(-math.pi * i / N + math.pi/4)
-
-    G1 = givens_rotation(dim, 0, 1, theta)
-    G2 = givens_rotation(dim, 1, 2, phi)
-    P  = diagonal_phase(dim, [psi1, psi2, psi3])
-    U  = P @ G2 @ G1
-    return U
+#wavelengths are R x num_wave_angles x dim
+#b are R x num_wave_angles x 1
 
 # Define the 2D grid
 num_grid_points = 40000
@@ -50,33 +33,14 @@ X, Y = torch.meshgrid(x, y, indexing="xy")  # Create the 2D grid
 X = X.reshape(-1)
 Y = Y.reshape(-1)
 XY  = torch.stack((X, Y), dim=-1)
-#shape: wavelength x angles x coordinates
-num_wave_angles = 3
-wave_length_stddev = 0.5 #single "scale"
-N = 2000
-#wavelengths = torch.abs(torch.randn((N, 1)) * wave_length_stddev)
+g = wavelengths.reshape((-1, dim))
+b = b.reshape((-1, 1))
+gxy = torch.einsum("ij, kj->ki", g, XY).unsqueeze(-1)
+z = torch.cos(gxy + b)
+z = z.squeeze(-1)
+kernel_approx = (2 / R) * (z * z).sum(-1)
 
-#wavelengths_x = torch.randn((N, 1)) * wave_length_stddev **2 + torch.zeros((N, 1))
-#wavelengths_y = torch.randn((N, 1)) * wave_length_stddev **2 + torch.zeros((N, 1))
-#wavelengths = torch.sqrt(wavelengths_x ** 2 + wavelengths_y**2)
-wavelengths = torch.abs(torch.randn((N, 1)) * wave_length_stddev)
 
-wavelengths = wavelengths.sort(dim=0)[0]
-
-theta_initial = torch.rand((N,1)) * 360
-theta_degrees = theta_initial + torch.arange(num_wave_angles).repeat(N, 1) * 360 / num_wave_angles #for now, don't randomize the directions..?
-theta_degrees = theta_degrees % 360
-theta = theta_degrees * torch.pi / 180.0
-k = 2 * torch.pi / wavelengths
-k_x = k * torch.cos(theta)
-k_y = k * torch.sin(theta) 
-omega = torch.stack((k_x, k_y), dim=-1)
-waves = torch.exp(1j * torch.einsum("kib, jb->jki", omega, XY))#num_grid_points, N, num_wave_angles
-waves = waves.reshape(-1, num_wave_angles, 1)
-
-C = generate_one_unitary_matrix().unsqueeze(0)
-#C = torch.eye(3).unsqueeze(0) * 1j
-g = torch.matmul(C, waves)
 g = g.reshape(num_grid_points_1d, num_grid_points_1d, N, num_wave_angles)
 
 def distance_fun(x1, y1, x2, y2):

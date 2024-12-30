@@ -68,7 +68,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     )
 
     # Create loss and adv modules
-    adv_module = GAE(
+    estimator = GAE(
         gamma=cfg.loss.gamma,
         lmbda=cfg.loss.gae_lambda,
         value_network=critic,
@@ -83,9 +83,9 @@ def main(cfg: "DictConfig"):  # noqa: F821
         loss_critic_type=cfg.loss.loss_critic_type,
         entropy_coef=cfg.loss.entropy_coef,
         critic_coef=cfg.loss.critic_coef,
-        normalize_advantage=False,
+        normalize_advantage=True,
         functional=False,
-        use_targets = True
+        #use_targets = False
     )
 
     # Create optimizers
@@ -140,7 +140,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     estimator = VTrace(gamma = 0.99,
                        value_network=critic,
                        actor_network=actor,
-                       average_adv=True)
+                       average_adv=False)
     
     for i, data in enumerate(collector):
 
@@ -171,25 +171,44 @@ def main(cfg: "DictConfig"):  # noqa: F821
             loc = data["loc"],
             scale = data["scale"]
         )
-
-        with torch.no_grad():
-            data = estimator(data)
        
-        for j in range(cfg_loss_ppo_epochs):
+        #######################
+        with torch.no_grad():
             sampled_actions = prior_dist.sample(sample_shape=(N,)).permute(1, 0, 2)
-                     
             data['sampled_actions'] = sampled_actions
-            # Compute GAE 
-            #todo: create target networks etc.
-#            if j > 0:
+            z_cmpo_td = data.clone(False)
+            prior_actions = z_cmpo_td["sampled_actions"]
+            N = prior_actions.shape[1]
 
-            # else:
-            #     with torch.no_grad():
-            #         data = adv_module(data)
+            z_cmpo_td['observation'] = z_cmpo_td['observation'].unsqueeze(-2).expand(-1, N, -1)
+            predicted_rewards = reward_predictor(z_cmpo_td['observation'], prior_actions)
+
+            z_cmpo_td['next', 'observation'] = z_cmpo_td['next', 'observation'].unsqueeze(-2).expand(-1, N, -1)
+
+            predicted_values = critic(z_cmpo_td['next', 'observation'])
+
+            predicted_qvalues = predicted_rewards + cfg.loss.gamma * predicted_values
+            values = critic(z_cmpo_td['observation'])
+            cmpo_advantages = predicted_qvalues - values
+            cmpo_loc = cmpo_advantages.mean(dim=1, keepdim=True)
+            cmpo_scale = cmpo_advantages.std(dim=1, keepdim=True).clamp_min(1e-6)
+            cmpo_advantages = (cmpo_advantages - cmpo_loc) / cmpo_scale
+            #cmpo_advantages = cmpo_advantages + 0.02 * torch.rand_like(cmpo_advantages) - 0.01
+            cmpo_advantages = torch.clip(cmpo_advantages, torch.tensor(-1.0, device=cmpo_advantages.device), torch.tensor(1.0, device=cmpo_advantages.device))
+            cmpo_advantages = torch.exp(cmpo_advantages)
+            z_cmpo = (1 + torch.sum(cmpo_advantages, dim=1, keepdim=True) - cmpo_advantages) / N
+            regularization = cmpo_advantages / z_cmpo
+            data["cmpo_regularization"] = regularization
+        #print('ok')
+
+        ################################
+        for j in range(cfg_loss_ppo_epochs):                     
+            with torch.no_grad():
+                data = estimator(data)
+
+            
+                
             data_reshape = data.reshape(-1)
-            # Compute reward prediction
-
-            # Update the data buffer
             data_buffer.extend(data_reshape)
             for k, batch in enumerate(data_buffer):
                 # Get a data batch

@@ -199,6 +199,8 @@ class CMPOLoss(PPOLoss):
         actor_network: ProbabilisticTensorDictSequential | None = None,
         critic_network: TensorDictModule | None = None,
         reward_network: TensorDictModule | None = None,
+        encoder_network: TensorDictModule | None = None,
+        dynamics_network: TensorDictModule | None = None,
         *,
         clip_epsilon: float = 0.2,
         entropy_bonus: bool = True,
@@ -234,8 +236,11 @@ class CMPOLoss(PPOLoss):
             clip_value=clip_value,
             **kwargs,
         )
-        self.reward_network = reward_network
         self.reward_coef = reward_coef
+        
+        self.reward_network = reward_network
+        self.encoder_network = encoder_network
+        self.dynamics_network = dynamics_network
 
         for p in self.parameters():
             device = p.device
@@ -254,7 +259,7 @@ class CMPOLoss(PPOLoss):
     @property
     def out_keys(self):
         if self._out_keys is None:
-            keys = ["loss_objective", "clip_fraction"]
+            keys = ["loss_objective", "clip_fraction", "loss_regularization"]
             if self.entropy_bonus:
                 keys.extend(["entropy", "loss_entropy"])
             if self.loss_critic:
@@ -285,7 +290,7 @@ class CMPOLoss(PPOLoss):
             loc = advantage.mean()
             scale = advantage.std().clamp_min(1e-6)
             advantage = (advantage - loc) / scale
-
+        tensordict['observation_encoded'] = tensordict['observation_encoded'].detach()
         log_weight, dist, kl_approx = self._log_weight(tensordict)
         # ESS for logging
         with torch.no_grad():
@@ -303,8 +308,8 @@ class CMPOLoss(PPOLoss):
             z_cmpo_td = tensordict.clone(False)
             prior_actions = z_cmpo_td["sampled_actions"]
             N = prior_actions.shape[1]
-
-            z_cmpo_td['observation'] = z_cmpo_td['observation'].unsqueeze(-2).expand(-1, N, -1)
+            z_cmpo_td['observation_encoded'] = z_cmpo_td['observation_encoded'].unsqueeze(-2).expand(-1, N, -1)
+            log_weight_expanded = log_weight.unsqueeze(-2).expand(-1, N, -1)
             #predicted_rewards = self.reward_network.module(z_cmpo_td['observation'], prior_actions)
 
             #z_cmpo_td['next', 'observation'] = z_cmpo_td['next', 'observation'].unsqueeze(-2).expand(-1, N, -1)
@@ -345,9 +350,17 @@ class CMPOLoss(PPOLoss):
             td_out.set("entropy", entropy.detach().mean())  # for logging
             td_out.set("kl_approx", kl_approx.detach().mean())  # for logging
             td_out.set("loss_entropy", -self.entropy_coef * entropy)
+        tensordict = self.encoder_network(tensordict) #add gradient
+        tensordict = self.dynamics_network(tensordict)
+        #loss_next_value = 
+        with torch.no_grad():
+            tensordict['next', 'observation_encoded'] = tensordict['next', 'observation_encoded'].detach()
+        loss_consistency = torch.nn.functional.mse_loss(tensordict['next_observation_encoded'], tensordict['next', 'observation_encoded'], reduction="none")
+        loss_consistency = loss_consistency.sum(dim=-1, keepdim=True)
+        td_out.set("loss_consistency", loss_consistency)
         if self.reward_coef is not None:
             loss_reward_predictor = self.loss_reward_predictor(tensordict)
-            td_out.set("loss_reward_predictor", loss_reward_predictor)
+            td_out.set("loss_reward", loss_reward_predictor)
 
         if self.critic_coef is not None:
             loss_critic, value_clip_fraction = self.loss_critic(tensordict)
@@ -368,7 +381,7 @@ class CMPOLoss(PPOLoss):
         target_reward = tensordict.get(("next", self.tensor_keys.reward), None)
         reward_predictor_td = self.reward_network(tensordict)
 
-        reward_prediction = reward_predictor_td.get(self.tensor_keys.reward_value)
+        reward_prediction = reward_predictor_td.get("next_reward")
         loss_reward_value = distance_loss(reward_prediction, target_reward, 
                                           loss_function="l2")
         return loss_reward_value

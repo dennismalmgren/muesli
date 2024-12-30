@@ -2,12 +2,18 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
-from __future__ import annotations
 
 import torch.nn
 import torch.optim
 
-from tensordict.nn import AddStateIndependentNormalScale, TensorDictModule
+from tensordict.nn import (
+    AddStateIndependentNormalScale, 
+    TensorDictModule, 
+    NormalParamExtractor, 
+    TensorDictSequential
+)
+
+from torchrl.data import Composite
 from torchrl.envs import (
     ClipTransform,
     DoubleToFloat,
@@ -43,27 +49,42 @@ def make_env(env_name="HalfCheetah-v4", device="cpu", from_pixels: bool = False)
 # --------------------------------------------------------------------
 
 
-def make_ppo_models_state(proof_environment, device):
+def make_ppo_models_state(proof_environment):
 
     # Define input shape
     input_shape = proof_environment.observation_spec["observation"].shape
 
     # Define policy output distribution class
-    num_outputs = proof_environment.action_spec_unbatched.shape[-1]
+    num_outputs = proof_environment.action_spec.shape[-1]
+    latent_dim = 256
+
+    # Encoder
+    encoder_mlp = MLP(
+        in_features=input_shape[-1],
+        activation_class=torch.nn.Tanh,
+        out_features=latent_dim,  # predict only loc
+        num_cells=[64, 64],
+    )
+
+    for layer in encoder_mlp.modules():
+        if isinstance(layer, torch.nn.Linear):
+            torch.nn.init.orthogonal_(layer.weight, 1.0)
+            layer.bias.data.zero_()
+
+
     distribution_class = TanhNormal
     distribution_kwargs = {
-        "low": proof_environment.action_spec_unbatched.space.low.to(device),
-        "high": proof_environment.action_spec_unbatched.space.high.to(device),
+        "low": proof_environment.action_spec_unbatched.space.low,
+        "high": proof_environment.action_spec_unbatched.space.high,
         "tanh_loc": False,
     }
 
     # Define policy architecture
     policy_mlp = MLP(
-        in_features=input_shape[-1],
+        in_features=latent_dim,
         activation_class=torch.nn.Tanh,
         out_features=num_outputs,  # predict only loc
         num_cells=[64, 64],
-        device=device,
     )
 
     # Initialize policy weights
@@ -76,19 +97,39 @@ def make_ppo_models_state(proof_environment, device):
     policy_mlp = torch.nn.Sequential(
         policy_mlp,
         AddStateIndependentNormalScale(
-            proof_environment.action_spec_unbatched.shape[-1], scale_lb=1e-8
-        ).to(device),
+            proof_environment.action_spec.shape[-1], scale_lb=1e-8
+        ),
+    )
+
+    encoder_module = TensorDictModule(
+        encoder_mlp,
+        in_keys=["observation"],
+        out_keys=["observation_encoded"]
+    )
+    policy_module = TensorDictModule(
+        policy_mlp,
+        in_keys=["observation_encoded"],
+        out_keys=["loc", "scale"],
+    )
+
+    latent_actor_module = ProbabilisticActor(
+        module=policy_module,
+        in_keys=["loc", "scale"],
+        spec=Composite(action=proof_environment.action_spec),
+        distribution_class=distribution_class,
+        distribution_kwargs=distribution_kwargs,
+        return_log_prob=True,
+        default_interaction_type=ExplorationType.RANDOM,
     )
 
     # Add probabilistic sampling of the actions
-    policy_module = ProbabilisticActor(
-        TensorDictModule(
-            module=policy_mlp,
-            in_keys=["observation"],
-            out_keys=["loc", "scale"],
+    actor_module = ProbabilisticActor(
+        module=TensorDictSequential(
+            encoder_module,
+            policy_module
         ),
         in_keys=["loc", "scale"],
-        spec=proof_environment.full_action_spec_unbatched.to(device),
+        spec=Composite(action=proof_environment.action_spec),
         distribution_class=distribution_class,
         distribution_kwargs=distribution_kwargs,
         return_log_prob=True,
@@ -97,11 +138,10 @@ def make_ppo_models_state(proof_environment, device):
 
     # Define value architecture
     value_mlp = MLP(
-        in_features=input_shape[-1],
+        in_features=latent_dim,
         activation_class=torch.nn.Tanh,
         out_features=1,
-        num_cells=[64, 64],
-        device=device,
+        num_cells=[128, 128],
     )
 
     # Initialize value weights
@@ -113,16 +153,59 @@ def make_ppo_models_state(proof_environment, device):
     # Define value module
     value_module = ValueOperator(
         value_mlp,
-        in_keys=["observation"],
+        in_keys=["observation_encoded"],
+    )
+    
+    # Define reward architecture
+    reward_mlp = MLP(
+        in_features = latent_dim + num_outputs,
+        activation_class = torch.nn.Tanh,
+        out_features = 1,
+        num_cells = [64, 64]
     )
 
-    return policy_module, value_module
+    # Define reward weights
+    for layer in reward_mlp.modules():
+        if isinstance(layer, torch.nn.Linear):
+            torch.nn.init.orthogonal_(layer.weight, 0.01)
+            layer.bias.data.zero_()
+
+    # Define reward module
+    reward_module = ValueOperator(
+        reward_mlp,
+        in_keys=["observation_encoded", "action"],
+        out_keys=["next_reward"]
+    )
+
+    # Define dynamics architecture
+    dynamics_mlp = MLP(
+        in_features = latent_dim + num_outputs,
+        activation_class = torch.nn.Tanh,
+        out_features = latent_dim,
+        num_cells = [256, 256]
+    )
+
+    # Define reward weights
+    for layer in dynamics_mlp.modules():
+        if isinstance(layer, torch.nn.Linear):
+            torch.nn.init.orthogonal_(layer.weight, 0.1)
+            layer.bias.data.zero_()
+
+    # Define reward module
+    dynamics_module = TensorDictModule(
+        dynamics_mlp,
+        in_keys=["observation_encoded", "action"],
+        out_keys=["next_observation_encoded"],
+    )
 
 
-def make_ppo_models(env_name, device):
-    proof_environment = make_env(env_name, device=device)
-    actor, critic = make_ppo_models_state(proof_environment, device=device)
-    return actor, critic
+    return latent_actor_module, value_module, reward_module, encoder_module, dynamics_module, actor_module
+
+
+def make_ppo_models(env_name):
+    proof_environment = make_env(env_name, device="cpu")
+    latent_actor_module, value_module, reward_module, encoder_module, dynamics_module, actor_module = make_ppo_models_state(proof_environment)
+    return latent_actor_module, value_module, reward_module, encoder_module, dynamics_module, actor_module
 
 
 # ====================================================================

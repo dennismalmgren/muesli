@@ -202,7 +202,7 @@ class HGaussCMPOLoss(LossModule):
         reward_network: TensorDictModule | None = None,
         *,
         entropy_bonus: bool = True,
-        samples_mc_entropy: int = 1,
+        samples_mc_entropy: int = 16,
         entropy_coef: float = 0.01,
         critic_coef: float = 1.0,
         reward_coef: float = 1.0,
@@ -210,9 +210,9 @@ class HGaussCMPOLoss(LossModule):
         normalize_advantage: bool = False,
         gamma: float = None,
         separate_losses: bool = False,
-        reduction: str = None,
+        reduction: str = "mean",
         clip_value: bool | float | None = None,
-        z_num_samples: int = 16,
+        z_num_samples: int = 64,
         support: torch.Tensor = None,
         **kwargs,
     ):
@@ -225,7 +225,7 @@ class HGaussCMPOLoss(LossModule):
         self.normalize_advantage = normalize_advantage
         self.gamma = gamma
         self.reduction = reduction
-
+        self.samples_mc_entropy = samples_mc_entropy
         self.reward_network = reward_network
         self.reward_coef = reward_coef
         self.z_num_samples = z_num_samples
@@ -242,6 +242,9 @@ class HGaussCMPOLoss(LossModule):
         self.convert_to_functional(critic_network,
                                    "critic_network",
                                    create_target_params=True)
+        self.convert_to_functional(reward_network,
+                            "reward_network",
+                            create_target_params=True)
         
         self.make_value_estimator()
         self.register_buffer("support", support.to(device))
@@ -323,7 +326,7 @@ class HGaussCMPOLoss(LossModule):
                 keys.append("loss_critic")
             if self.clip_value:
                 keys.append("value_clip_fraction")
-            keys.append("ESS")
+            #keys.append("ESS")
 
             self._out_keys = keys
         return self._out_keys
@@ -406,21 +409,27 @@ class HGaussCMPOLoss(LossModule):
             prior_actions = prior_dist.sample(sample_shape=(self.z_num_samples,)).movedim(0, -2)
             z_cmpo_td = tensordict.select(*["observation", ("next", "observation"), ("next", "terminated"), "state_value"]).unsqueeze(-1).expand(*tensordict.batch_size, self.z_num_samples)
             z_cmpo_td.set(self.tensor_keys.action, prior_actions)
-            self.reward_network(z_cmpo_td) 
+            with self.target_reward_network_params.to_module( #TODO: This is for q-prior, so unsure of whether to use v or v_target
+                self.reward_network
+            ) if self.functional else contextlib.nullcontext():
+                reward_td = self.reward_network(z_cmpo_td) 
+            z_cmpo_td = reward_td
             z_cmpo_td_next = z_cmpo_td["next"]
             with self.target_critic_network_params.to_module( #TODO: This is for q-prior, so unsure of whether to use v or v_target
                 self.critic_network
             ) if self.functional else contextlib.nullcontext():
-                self.critic_network(z_cmpo_td_next)
+                state_value_td = self.critic_network(z_cmpo_td_next)
+            z_cmpo_td_next = state_value_td
             z_cmpo_td["next", "state_value"] = z_cmpo_td_next["state_value"]
             terminateds = z_cmpo_td['next', 'terminated']
             predicted_rewards = z_cmpo_td['reward_value']
-            predicted_values = z_cmpo_td["state_value"]
+            predicted_values = z_cmpo_td["next", "state_value"]
             predicted_qvalues = predicted_rewards + self.gamma * predicted_values * (1 - terminateds.float())
             values = tensordict['state_value'].unsqueeze(-1)
             cmpo_advantages = predicted_qvalues - values
             cmpo_loc = cmpo_advantages.mean(dim=-2, keepdim=True)
             cmpo_scale = cmpo_advantages.std(dim=-2, keepdim=True).clamp_min(1e-6)
+            cmpo_advantages = (cmpo_advantages - cmpo_loc) / cmpo_scale
             cmpo_advantages = torch.clip(cmpo_advantages, torch.tensor(-1.0, device=cmpo_advantages.device), torch.tensor(1.0, device=cmpo_advantages.device))
             cmpo_advantages = torch.exp(cmpo_advantages)
             z_cmpo = (1 + torch.sum(cmpo_advantages, dim=-2, keepdim=True) - cmpo_advantages) / self.z_num_samples
@@ -431,38 +440,37 @@ class HGaussCMPOLoss(LossModule):
             dist = self.actor_network.get_dist(z_cmpo_td)
         regularization = -cmpo_advantages / z_cmpo * dist.log_prob(prior_actions).unsqueeze(-1)
         regularization = regularization.mean(dim=-2)
-        print('ok')
         
 
 
-        with torch.no_grad():
-            z_cmpo_td = tensordict.clone(False)
-            prior_actions = z_cmpo_td["sampled_actions"]
-            N = prior_actions.shape[1]
+        # with torch.no_grad():
+        #     z_cmpo_td = tensordict.clone(False)
+        #     prior_actions = z_cmpo_td["sampled_actions"]
+        #     N = prior_actions.shape[1]
 
-            z_cmpo_td['observation'] = z_cmpo_td['observation'].unsqueeze(-2).expand(-1, N, -1)
-            predicted_rewards = self.reward_network.module(z_cmpo_td['observation'], prior_actions)
+        #     z_cmpo_td['observation'] = z_cmpo_td['observation'].unsqueeze(-2).expand(-1, N, -1)
+        #     predicted_rewards = self.reward_network.module(z_cmpo_td['observation'], prior_actions)
 
-            z_cmpo_td['next', 'observation'] = z_cmpo_td['next', 'observation'].unsqueeze(-2).expand(-1, N, -1)
-            next_td = z_cmpo_td["next"].clone()
-            predicted_values = self.critic_network(next_td)["state_value"]
-            predicted_qvalues = predicted_rewards + 0.99 * predicted_values
-            values = self.critic_network(z_cmpo_td.clone())["state_value"]
-            cmpo_advantages = predicted_qvalues - values
-            cmpo_loc = cmpo_advantages.mean(dim=1, keepdim=True)
-            cmpo_scale = cmpo_advantages.std(dim=1, keepdim=True).clamp_min(1e-6)
-            cmpo_advantages = (cmpo_advantages - cmpo_loc) / cmpo_scale
-            #cmpo_advantages = cmpo_advantages + 0.02 * torch.rand_like(cmpo_advantages) - 0.01
-            cmpo_advantages = torch.clip(cmpo_advantages, torch.tensor(-1.0, device=cmpo_advantages.device), torch.tensor(1.0, device=cmpo_advantages.device))
-            cmpo_advantages = torch.exp(cmpo_advantages)
-            z_cmpo = (1 + torch.sum(cmpo_advantages, dim=1, keepdim=True) - cmpo_advantages) / N
-            z_cmpo_td["loc"] = z_cmpo_td["loc"].unsqueeze(-2)
-            z_cmpo_td["scale"] = z_cmpo_td["scale"].unsqueeze(-2)
-            dist = self.actor_network.get_dist(z_cmpo_td)
+        #     z_cmpo_td['next', 'observation'] = z_cmpo_td['next', 'observation'].unsqueeze(-2).expand(-1, N, -1)
+        #     next_td = z_cmpo_td["next"].clone()
+        #     predicted_values = self.critic_network(next_td)["state_value"]
+        #     predicted_qvalues = predicted_rewards + 0.99 * predicted_values
+        #     values = self.critic_network(z_cmpo_td.clone())["state_value"]
+        #     cmpo_advantages = predicted_qvalues - values
+        #     cmpo_loc = cmpo_advantages.mean(dim=1, keepdim=True)
+        #     cmpo_scale = cmpo_advantages.std(dim=1, keepdim=True).clamp_min(1e-6)
+        #     cmpo_advantages = (cmpo_advantages - cmpo_loc) / cmpo_scale
+        #     #cmpo_advantages = cmpo_advantages + 0.02 * torch.rand_like(cmpo_advantages) - 0.01
+        #     cmpo_advantages = torch.clip(cmpo_advantages, torch.tensor(-1.0, device=cmpo_advantages.device), torch.tensor(1.0, device=cmpo_advantages.device))
+        #     cmpo_advantages = torch.exp(cmpo_advantages)
+        #     z_cmpo = (1 + torch.sum(cmpo_advantages, dim=1, keepdim=True) - cmpo_advantages) / N
+        #     z_cmpo_td["loc"] = z_cmpo_td["loc"].unsqueeze(-2)
+        #     z_cmpo_td["scale"] = z_cmpo_td["scale"].unsqueeze(-2)
+        #     dist = self.actor_network.get_dist(z_cmpo_td)
 
-            #now it's B x 16
-        regularization = -cmpo_advantages / z_cmpo * dist.log_prob(prior_actions).unsqueeze(-1)
-        regularization = regularization.mean(dim=1)
+        #     #now it's B x 16
+        # regularization = -cmpo_advantages / z_cmpo * dist.log_prob(prior_actions).unsqueeze(-1)
+        # regularization = regularization.mean(dim=1)
         #regularization = -torch.exp(regularization) / z_cmpo * dist.log_prob(tensordict['action']).unsqueeze(-1)
         
         #log_weight_clip = log_weight.clamp(*self._clip_bounds)
@@ -489,7 +497,7 @@ class HGaussCMPOLoss(LossModule):
             if value_clip_fraction is not None:
                 td_out.set("value_clip_fraction", value_clip_fraction)
 
-        td_out.set("ESS", _reduce(ess, self.reduction) / batch)
+        #td_out.set("ESS", _reduce(ess, self.reduction) / batch)
         td_out = td_out.named_apply(
             lambda name, value: _reduce(value, reduction=self.reduction).squeeze(-1)
             if name.startswith("loss_")
@@ -498,6 +506,22 @@ class HGaussCMPOLoss(LossModule):
         )
         return td_out
 
+    def get_entropy_bonus(self, dist: d.Distribution) -> torch.Tensor:
+            try:
+                if isinstance(dist, CompositeDistribution):
+                    kwargs = {"aggregate_probabilities": False, "include_sum": False}
+                else:
+                    kwargs = {}
+                entropy = dist.entropy(**kwargs)
+                if is_tensor_collection(entropy):
+                    entropy = _sum_td_features(entropy)
+            except NotImplementedError:
+                x = dist.rsample((self.samples_mc_entropy,))
+                log_prob = dist.log_prob(x)
+                if is_tensor_collection(log_prob):
+                    log_prob = log_prob.get(self.tensor_keys.sample_log_prob)
+                entropy = -log_prob.mean(0)
+            return entropy.unsqueeze(-1)
 
     def _log_weight(
         self, tensordict: TensorDictBase
@@ -547,8 +571,8 @@ class HGaussCMPOLoss(LossModule):
         """Returns the critic loss multiplied by ``critic_coef``, if it is not ``None``."""
         # TODO: if the advantage is gathered by forward, this introduces an
         # overhead that we could easily reduce.
-        if self.separate_losses:
-            tensordict = tensordict.detach()
+        # if self.separate_losses:
+        #     tensordict = tensordict.detach()
         target_return = tensordict.get(
             self.tensor_keys.value_target, None
         )  # TODO: None soon to be removed
@@ -561,16 +585,16 @@ class HGaussCMPOLoss(LossModule):
                 f"can be used for the value loss."
             )
 
-        if self.clip_value:
-            old_state_value = tensordict.get(
-                self.tensor_keys.value, None
-            )  # TODO: None soon to be removed
-            if old_state_value is None:
-                raise KeyError(
-                    f"clip_value is set to {self.clip_value}, but "
-                    f"the key {self.tensor_keys.value} was not found in the input tensordict. "
-                    f"Make sure that the value_key passed to PPO exists in the input tensordict."
-                )
+        # if self.clip_value:
+        #     old_state_value = tensordict.get(
+        #         self.tensor_keys.value, None
+        #     )  # TODO: None soon to be removed
+        #     if old_state_value is None:
+        #         raise KeyError(
+        #             f"clip_value is set to {self.clip_value}, but "
+        #             f"the key {self.tensor_keys.value} was not found in the input tensordict. "
+        #             f"Make sure that the value_key passed to PPO exists in the input tensordict."
+        #         )
 
         with self.critic_network_params.to_module(
             self.critic_network
@@ -592,15 +616,15 @@ class HGaussCMPOLoss(LossModule):
         loss_value = torch.nn.functional.cross_entropy(state_value_logits, target_return_logits, reduction="none")
 
         clip_fraction = None
-        if self.clip_value:
-            loss_value, clip_fraction = _clip_value_loss(
-                old_state_value,
-                state_value,
-                self.clip_value.to(state_value.device),
-                target_return,
-                loss_value,
-                self.loss_critic_type,
-            )
+        # if self.clip_value:
+        #     loss_value, clip_fraction = _clip_value_loss(
+        #         old_state_value,
+        #         state_value,
+        #         self.clip_value.to(state_value.device),
+        #         target_return,
+        #         loss_value,
+        #         self.loss_critic_type,
+        #     )
 
         if self.critic_coef is not None:
             return self.critic_coef * loss_value, clip_fraction
@@ -621,7 +645,10 @@ class HGaussCMPOLoss(LossModule):
     
     def loss_reward_predictor(self, tensordict):
         target_reward = tensordict.get(("next", self.tensor_keys.reward), None)
-        reward_predictor_td = self.reward_network(tensordict)
+        with self.reward_network_params.to_module(
+            self.reward_network
+        ) if self.functional else contextlib.nullcontext():
+            reward_predictor_td = self.reward_network(tensordict)
 
         reward_prediction = reward_predictor_td.get(self.tensor_keys.reward_value)
         loss_reward_value = distance_loss(reward_prediction, target_reward, 

@@ -34,7 +34,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     from torchrl.objectives.value.advantages import GAE
     from torchrl.record import VideoRecorder
     from torchrl.record.loggers import generate_exp_name, get_logger
-    from utils_mujoco import eval_model, make_env, make_ppo_models
+    from hgauss_utils_mujoco import eval_model, make_env, make_ppo_models
     from rs_ppo_loss import RSClipPPOLoss
 
     from torchrl.objectives.value.utils import _split_and_pad_sequence, _get_num_per_traj
@@ -50,7 +50,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
     device = torch.device(device)
 
     num_mini_batches = cfg.collector.frames_per_batch // cfg.loss.mini_batch_size
-    num_episodes_per_batch = cfg.collector.frames_per_batch // 1000
+    #num_episodes_per_batch = cfg.collector.frames_per_batch // 1000
+    #num_episodes_per_batch = cfg.collector.env_per_collector
     total_network_updates = (
         (cfg.collector.total_frames // cfg.collector.frames_per_batch)
         * cfg.loss.ppo_epochs
@@ -67,7 +68,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 compile_mode = "reduce-overhead"
 
     # Create models (check utils_mujoco.py)
-    actor, critic = make_ppo_models(cfg.env.env_name, device=device)
+    actor, critic, reward_predictor, support = make_ppo_models(cfg.env.env_name, device=device)
 
     # Create collector
     collector = SyncDataCollector(
@@ -81,6 +82,15 @@ def main(cfg: "DictConfig"):  # noqa: F821
         compile_policy={"mode": compile_mode, "warmup": 1} if compile_mode else False,
         cudagraph_policy=cfg.compile.cudagraphs,
     )
+    import math
+    nbins = 101
+    Vmin = -10.0
+    Vmax = 500.0
+    dk = (Vmax - Vmin) / (nbins - 4)
+    Ktot = dk * nbins
+    Vmax = math.ceil(Vmin + Ktot)
+
+    support = torch.linspace(Vmin, Vmax, nbins).to(device)
 
     # Create data buffer
     sampler = SamplerWithoutReplacement()
@@ -105,9 +115,10 @@ def main(cfg: "DictConfig"):  # noqa: F821
         vectorized=not cfg.compile.compile,
     )
 
-    loss_module = ClipPPOLoss(
+    loss_module = RSClipPPOLoss(
         actor_network=actor,
         critic_network=critic,
+        support=support,
         clip_epsilon=cfg.loss.clip_epsilon,
         loss_critic_type=cfg.loss.loss_critic_type,
         entropy_coef=cfg.loss.entropy_coef,
@@ -213,7 +224,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
         with timeit("collecting"):
             data = next(collector_iter)
         
-        if not cfg.loss.bootstrap_rs_value_target:
+        if cfg.loss.bootstrap_rs_value_target == "episode":
             vals = torch.linspace(0, num_episodes_per_batch, num_episodes_per_batch + 1) / num_episodes_per_batch
             scale = torch.ones_like(vals)
             loc = torch.zeros_like(vals)
@@ -226,8 +237,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
             w_deltas = w_final[1:] - w_final[:-1]
             w_deltas = w_deltas / torch.sum(w_deltas) * num_episodes_per_batch
 
-        else:
-            vals = torch.linspace(0, cfg.collector.frames_per_batch, cfg.collector.frames_per_batch + 1) / cfg.collector.frames_per_batch
+        elif cfg.loss.bootstrap_rs_value_target == "parallel":
+            vals = torch.linspace(0, cfg.collector.env_per_collector, cfg.collector.env_per_collector + 1, device=device) / cfg.collector.env_per_collector
             scale = torch.ones_like(vals)
             loc = torch.zeros_like(vals)
             w = torch.distributions.normal.Normal(loc, scale)
@@ -237,7 +248,18 @@ def main(cfg: "DictConfig"):  # noqa: F821
             w_final = w.cdf(inv_plus_eta)
             #trim the edges
             w_deltas = w_final[1:] - w_final[:-1]
-            w_deltas = w_deltas / torch.sum(w_deltas) * num_episodes_per_batch
+            w_deltas = w_deltas / torch.sum(w_deltas) * w_deltas.numel()
+            # vals = torch.linspace(0, cfg.collector.frames_per_batch, cfg.collector.frames_per_batch + 1) / cfg.collector.frames_per_batch
+            # scale = torch.ones_like(vals)
+            # loc = torch.zeros_like(vals)
+            # w = torch.distributions.normal.Normal(loc, scale)
+            # inv = w.icdf(vals)
+            
+            # inv_plus_eta = inv + 0.25
+            # w_final = w.cdf(inv_plus_eta)
+            # #trim the edges
+            # w_deltas = w_final[1:] - w_final[:-1]
+            # w_deltas = w_deltas / torch.sum(w_deltas) * num_episodes_per_batch
 
         log_info = {}
         frames_in_batch = data.numel()
@@ -270,7 +292,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     # num_per_traj = _get_num_per_traj(done)
     # td0_flat, mask = _split_and_pad_sequence(td0, num_per_traj, return_mask=True)
     #sort data
-        if not cfg.loss.bootstrap_rs_value_target:
+        if cfg.loss.bootstrap_rs_value_target == "episode":
             data = data.reshape((num_episodes_per_batch, 1000))
             episode_rewards = data["next", "episode_reward"][data["next", "done"]]
             sorted_indices = torch.sort(episode_rewards)[1]
@@ -287,12 +309,18 @@ def main(cfg: "DictConfig"):  # noqa: F821
                     if compile_mode:
                         data = data.clone()
 
-                if cfg.loss.bootstrap_rs_value_target:
+                if cfg.loss.bootstrap_rs_value_target == "single":
                     value_targets = data["value_target"].squeeze(-1)
                     sorted_indices = torch.sort(value_targets)[1]
                     data = data[sorted_indices]
                     data["rs_weight"] = w_deltas.unsqueeze(-1).expand(cfg.collector.frames_per_batch, 1)
-                    
+                elif cfg.loss.bootstrap_rs_value_target == "parallel":
+                    value_targets = data["value_target"].squeeze(-1)
+                    value_targets = value_targets[..., -1]
+                    sorted_indices = torch.sort(value_targets)[1]
+                    w_deltas_batch = w_deltas[sorted_indices]
+                    data["rs_weight"] = w_deltas_batch.unsqueeze(-1).unsqueeze(-1).expand(cfg.collector.env_per_collector, 100, 1)
+
                 with timeit("rb - extend"):
                     # Update the data buffer
                     data_reshape = data.reshape(-1)

@@ -2,12 +2,12 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
-from __future__ import annotations
 
 import torch.nn
 import torch.optim
 
 from tensordict.nn import AddStateIndependentNormalScale, TensorDictModule
+from torchrl.data import Composite
 from torchrl.envs import (
     ClipTransform,
     DoubleToFloat,
@@ -20,6 +20,8 @@ from torchrl.envs import (
 from torchrl.envs.libs.gym import GymEnv
 from torchrl.modules import MLP, ProbabilisticActor, TanhNormal, ValueOperator
 from torchrl.record import VideoRecorder
+
+import lora_layers as ll
 
 
 # ====================================================================
@@ -43,18 +45,24 @@ def make_env(env_name="HalfCheetah-v4", device="cpu", from_pixels: bool = False)
 # --------------------------------------------------------------------
 
 
-def make_ppo_models_state(proof_environment, device):
+def make_ppo_models_state(proof_environment):
 
     # Define input shape
     input_shape = proof_environment.observation_spec["observation"].shape
 
     # Define policy output distribution class
-    num_outputs = proof_environment.action_spec_unbatched.shape[-1]
+    num_outputs = proof_environment.action_spec.shape[-1]
     distribution_class = TanhNormal
     distribution_kwargs = {
-        "low": proof_environment.action_spec_unbatched.space.low.to(device),
-        "high": proof_environment.action_spec_unbatched.space.high.to(device),
+        "low": proof_environment.action_spec_unbatched.space.low,
+        "high": proof_environment.action_spec_unbatched.space.high,
         "tanh_loc": False,
+    }
+
+    layer_kwargs = {
+        "r": 1,
+        "lora_alpha": 1,
+        "enabled": False,
     }
 
     # Define policy architecture
@@ -62,8 +70,9 @@ def make_ppo_models_state(proof_environment, device):
         in_features=input_shape[-1],
         activation_class=torch.nn.Tanh,
         out_features=num_outputs,  # predict only loc
+        layer_class=ll.Linear,
+        layer_kwargs = layer_kwargs,
         num_cells=[64, 64],
-        device=device,
     )
 
     # Initialize policy weights
@@ -71,13 +80,14 @@ def make_ppo_models_state(proof_environment, device):
         if isinstance(layer, torch.nn.Linear):
             torch.nn.init.orthogonal_(layer.weight, 1.0)
             layer.bias.data.zero_()
+            layer.enabled = False
 
     # Add state-independent normal scale
     policy_mlp = torch.nn.Sequential(
         policy_mlp,
         AddStateIndependentNormalScale(
-            proof_environment.action_spec_unbatched.shape[-1], scale_lb=1e-8
-        ).to(device),
+            proof_environment.action_spec.shape[-1], scale_lb=1e-8
+        ),
     )
 
     # Add probabilistic sampling of the actions
@@ -88,7 +98,7 @@ def make_ppo_models_state(proof_environment, device):
             out_keys=["loc", "scale"],
         ),
         in_keys=["loc", "scale"],
-        spec=proof_environment.full_action_spec_unbatched.to(device),
+        spec=Composite(action=proof_environment.action_spec),
         distribution_class=distribution_class,
         distribution_kwargs=distribution_kwargs,
         return_log_prob=True,
@@ -101,7 +111,6 @@ def make_ppo_models_state(proof_environment, device):
         activation_class=torch.nn.Tanh,
         out_features=1,
         num_cells=[64, 64],
-        device=device,
     )
 
     # Initialize value weights
@@ -119,9 +128,9 @@ def make_ppo_models_state(proof_environment, device):
     return policy_module, value_module
 
 
-def make_ppo_models(env_name, device):
-    proof_environment = make_env(env_name, device=device)
-    actor, critic = make_ppo_models_state(proof_environment, device=device)
+def make_ppo_models(env_name):
+    proof_environment = make_env(env_name, device="cpu")
+    actor, critic = make_ppo_models_state(proof_environment)
     return actor, critic
 
 

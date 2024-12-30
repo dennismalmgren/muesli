@@ -1,11 +1,12 @@
 # task and env
 env:
-  env_name: Hopper-v4
+  env_name: HalfCheetah-v4
 
 # collector
 collector:
-  frames_per_batch: 2048
-  total_frames: 1_000_000
+  frames_per_batch: 1000 # N x 1000 for full episodes
+  total_frames: 10_000_000
+  env_per_collector: 20
 
 # logger
 logger:
@@ -18,27 +19,27 @@ logger:
   video: False
   mode: online
 
-network:
-  nbins: 101
-  vmin: -10
-  vmax: 500
-
-
 # Optim
 optim:
   lr: 3e-4
-  lr_critic: 3e-3
   weight_decay: 0.0
   anneal_lr: True
+  device:
 
 # loss
 loss:
   gamma: 0.99
-  mini_batch_size: 64
-  ppo_epochs: 10
+  mini_batch_size: 1000
+  ppo_epochs: 2
   gae_lambda: 0.95
   clip_epsilon: 0.2
   anneal_clip_epsilon: False
   critic_coef: 1.0
   entropy_coef: 0.0
   loss_critic_type: l2
+  bootstrap_rs_value_target: "parallel" #single, episodes
+
+compile:
+  compile: False
+  compile_mode:
+  cudagraphs: False
