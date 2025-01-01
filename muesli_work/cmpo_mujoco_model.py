@@ -10,7 +10,7 @@ results from Schulman et al. 2017 for the on MuJoCo Environments.
 import hydra
 from torchrl._utils import logger as torchrl_logger
 from torchrl.record import VideoRecorder
-
+from modules.layers import SoftmaxLayer, ClampOperator
 
 @hydra.main(config_path="", config_name="config_mujoco", version_base="1.1")
 def main(cfg: "DictConfig"):  # noqa: F821
@@ -45,9 +45,9 @@ def main(cfg: "DictConfig"):  # noqa: F821
     )
 
     # Create models (check utils_mujoco.py)
-    latent_actor_module, value_module, reward_module, encoder_module, dynamics_module, actor_module = make_ppo_models(cfg.env.env_name)
-    latent_actor_module, value_module, reward_module, encoder_module, dynamics_module, actor_module = \
-        latent_actor_module.to(device), value_module.to(device), reward_module.to(device), encoder_module.to(device), dynamics_module.to(device), actor_module.to(device)
+    latent_actor_module, value_module, reward_module, encoder_module, dynamics_module, actor_module, reward_support, value_support = make_ppo_models(cfg.env.env_name, cfg)
+    latent_actor_module, value_module, reward_module, encoder_module, dynamics_module, actor_module, reward_support, value_support = \
+        latent_actor_module.to(device), value_module.to(device), reward_module.to(device), encoder_module.to(device), dynamics_module.to(device), actor_module.to(device), reward_support.to(device), value_support.to(device)
 
     # Create collector
     collector = SyncDataCollector(
@@ -83,6 +83,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
         encoder_network=encoder_module,
 #        policy_network=policy_module,
         dynamics_network=dynamics_module,
+        value_support = value_support,
+        reward_support = reward_support,
         clip_epsilon=cfg.loss.clip_epsilon,
         loss_critic_type=cfg.loss.loss_critic_type,
         entropy_coef=cfg.loss.entropy_coef,
@@ -150,6 +152,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
                        actor_network=actor_module,
                        average_adv=False)
     target_params_value = TensorDict.from_module(value_module)
+    target_params_actor = TensorDict.from_module(latent_actor_module)
     for i, data in enumerate(collector):
 
         log_info = {}
@@ -195,14 +198,14 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 N = prior_actions.shape[1]
 
                 z_cmpo_td['observation_encoded'] = z_cmpo_td['observation_encoded'].unsqueeze(-2).expand(-1, N, -1)
-                predicted_rewards = reward_module(z_cmpo_td['observation_encoded'], prior_actions)
+                predicted_rewards = reward_module(z_cmpo_td['observation_encoded'], prior_actions)[1]
                 predicted_next_observation_encoded = dynamics_module(z_cmpo_td['observation_encoded'], prior_actions)
                 #z_cmpo_td['next', 'observation'] = z_cmpo_td['next', 'observation'].unsqueeze(-2).expand(-1, N, -1)
                 #next_observation_encoded = encoder_module(z_cmpo_td['next', 'observation']) #todo: should be via dynamics module
                 #actually fix it right away...
                 with target_params_value.to_module(value_module):
-                    predicted_values = value_module(predicted_next_observation_encoded)
-                    values = value_module(z_cmpo_td['observation_encoded'])
+                    predicted_values = value_module(predicted_next_observation_encoded)[1]
+                    values = value_module(z_cmpo_td['observation_encoded'])[1]
                 predicted_qvalues = predicted_rewards + cfg.loss.gamma * predicted_values
                 cmpo_advantages = predicted_qvalues - values
                 cmpo_loc = cmpo_advantages.mean(dim=1, keepdim=True)

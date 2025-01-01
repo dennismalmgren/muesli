@@ -4,16 +4,15 @@ env:
 
 # collector
 collector:
-  frames_per_batch: 1000 # N x 1000 for full episodes
+  frames_per_batch: 2048
   total_frames: 10_000_000
-  env_per_collector: 20
 
 # logger
 logger:
   backend: wandb
-  project_name: torchrl_example_ppo
+  project_name: torchrl_ppo_discrete
   group_name: null
-  exp_name: Mujoco_Schulman17
+  exp_name: ppo_ordinal_7_64_init
   test_interval: 1_000_000
   num_test_episodes: 5
   video: False
@@ -29,25 +28,19 @@ optim:
 # loss
 loss:
   gamma: 0.99
-  mini_batch_size: 1000
-  ppo_epochs: 2
+  mini_batch_size: 64
+  ppo_epochs: 10
   gae_lambda: 0.95
   clip_epsilon: 0.2
   anneal_clip_epsilon: False
-  critic_coef: 1.0
+  critic_coef: 0.25
   entropy_coef: 0.0
   loss_critic_type: l2
-  bootstrap_rs_value_target: "parallel" #single, episodes
 
 compile:
   compile: False
   compile_mode:
   cudagraphs: False
 
-network:
-  vnbins: 101
-  vmin: -100
-  vmax: 1100
-  rnbins: 101
-  rmin: -10.0
-  rmax: 110.0
+models:
+  k_actions: 7

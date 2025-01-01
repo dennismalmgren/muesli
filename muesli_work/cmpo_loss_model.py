@@ -201,6 +201,8 @@ class CMPOLoss(PPOLoss):
         reward_network: TensorDictModule | None = None,
         encoder_network: TensorDictModule | None = None,
         dynamics_network: TensorDictModule | None = None,
+        value_support: torch.Tensor | None = None,
+        reward_support: torch.Tensor | None = None,
         *,
         clip_epsilon: float = 0.2,
         entropy_bonus: bool = True,
@@ -248,6 +250,43 @@ class CMPOLoss(PPOLoss):
         else:
             device = None
         self.register_buffer("clip_epsilon", torch.tensor(clip_epsilon, device=device))
+
+        # Reward support
+        self.register_buffer("reward_support", reward_support)
+        atoms = self.reward_support.numel()
+        Rmin = self.reward_support.min()
+        Rmax = self.reward_support.max()
+        delta_z = (Rmax - Rmin) / (atoms - 1)
+        self.register_buffer(
+            "reward_stddev", (0.75 * delta_z).unsqueeze(-1)
+        )
+        self.register_buffer(
+            "reward_support_plus",
+            self.reward_support + delta_z / 2
+        )
+        self.register_buffer(
+            "reward_support_minus",
+            self.reward_support - delta_z / 2
+        )
+
+        # Value support
+
+        self.register_buffer("value_support", value_support)
+        atoms = self.value_support.numel()
+        Vmin = self.value_support.min()
+        Vmax = self.value_support.max()
+        delta_z = (Vmax - Vmin) / (atoms - 1)
+        self.register_buffer(
+            "value_stddev", (0.75 * delta_z).unsqueeze(-1)
+        )
+        self.register_buffer(
+            "value_support_plus",
+            self.value_support + delta_z / 2
+        )
+        self.register_buffer(
+            "value_support_minus",
+            self.value_support - delta_z / 2
+        )
 
     @property
     def _clip_bounds(self):
@@ -376,13 +415,95 @@ class CMPOLoss(PPOLoss):
             batch_size=[],
         )
         return td_out
+    
+    def loss_critic(self, tensordict: TensorDictBase) -> torch.Tensor:
+        """Returns the critic loss multiplied by ``critic_coef``, if it is not ``None``."""
+        # TODO: if the advantage is gathered by forward, this introduces an
+        # overhead that we could easily reduce.
+        if self.separate_losses:
+            tensordict = tensordict.detach()
+        target_return = tensordict.get(
+            self.tensor_keys.value_target, None
+        )  # TODO: None soon to be removed
+        if target_return is None:
+            raise KeyError(
+                f"the key {self.tensor_keys.value_target} was not found in the input tensordict. "
+                f"Make sure you provided the right key and the value_target (i.e. the target "
+                f"return) has been retrieved accordingly. Advantage classes such as GAE, "
+                f"TDLambdaEstimate and TDEstimate all return a 'value_target' entry that "
+                f"can be used for the value loss."
+            )
+
+        if self.clip_value:
+            old_state_value = tensordict.get(
+                self.tensor_keys.value, None
+            )  # TODO: None soon to be removed
+            if old_state_value is None:
+                raise KeyError(
+                    f"clip_value is set to {self.clip_value}, but "
+                    f"the key {self.tensor_keys.value} was not found in the input tensordict. "
+                    f"Make sure that the value_key passed to PPO exists in the input tensordict."
+                )
+
+        with self.critic_network_params.to_module(
+            self.critic_network
+        ) if self.functional else contextlib.nullcontext():
+            state_value_td = self.critic_network(tensordict)
+
+        state_value = state_value_td.get(
+            self.tensor_keys.value, None
+        )  # TODO: None soon to be removed
+        if state_value is None:
+            raise KeyError(
+                f"the key {self.tensor_keys.value} was not found in the critic output tensordict. "
+                f"Make sure that the value_key passed to PPO is accurate."
+            )
+        state_value_logits = state_value_td.get("state_value_logits")
+        
+        target_return_logits = self.construct_gauss_dist(target_return, self.value_support, self.value_stddev, self.value_support_plus, self.value_support_minus)
+        loss_value = torch.nn.functional.cross_entropy(state_value_logits, target_return_logits, reduction="none").unsqueeze(-1)
+        # loss_value = distance_loss(
+        #     target_return,
+        #     state_value,
+        #     loss_function=self.loss_critic_type,
+        # )
+
+        clip_fraction = None
+        if self.clip_value:
+            loss_value, clip_fraction = _clip_value_loss(
+                old_state_value,
+                state_value,
+                self.clip_value.to(state_value.device),
+                target_return,
+                loss_value,
+                self.loss_critic_type,
+            )
+
+        if self.critic_coef is not None:
+            return self.critic_coef * loss_value, clip_fraction
+        return loss_value, clip_fraction
+    
 
     def loss_reward_predictor(self, tensordict):
         target_reward = tensordict.get(("next", self.tensor_keys.reward), None)
         reward_predictor_td = self.reward_network(tensordict)
 
-        reward_prediction = reward_predictor_td.get("next_reward")
-        loss_reward_value = distance_loss(reward_prediction, target_reward, 
-                                          loss_function="l2")
+        reward_prediction_logits = reward_predictor_td.get("next_reward_logits")
+        target_reward_logits = self.construct_gauss_dist(target_reward, self.reward_support, self.reward_stddev, self.reward_support_plus, self.reward_support_minus)
+        loss_reward_value = torch.nn.functional.cross_entropy(reward_prediction_logits, target_reward_logits, reduction="none").unsqueeze(-1)
+
         return loss_reward_value
+    
+    def construct_gauss_dist(self, loc, support, stddev, support_plus, support_minus):
+        loc = loc.clamp(support.min(), support.max())
+        stddev_expanded = stddev.expand_as(loc)
+        dist = torch.distributions.Normal(loc, stddev_expanded)
+        cdf_plus = dist.cdf(support_plus)
+        cdf_minus = dist.cdf(support_minus)
+        m = cdf_plus - cdf_minus
+            #m[..., 0] = cdf_plus[..., 0]
+            #m[..., -1] = 1 - cdf_minus[..., -1]
+        m = m / m.sum(dim=-1, keepdim=True)  #this should be handled differently. check the paper
+        assert torch.allclose(m.sum(dim=-1), torch.ones_like(m.sum(dim=-1)))
+        return m
     
