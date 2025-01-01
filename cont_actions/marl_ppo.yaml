@@ -4,6 +4,15 @@ env:
 
 seed: 0
 
+# Logger
+logger:
+  backend: wandb
+  mode: disabled
+  exp_name: cb
+  project: continuous_actions
+  test_interval: 100_000
+  num_test_episodes: 5
+
 collector:
   frames_per_batch: 400
   total_frames: 400000
