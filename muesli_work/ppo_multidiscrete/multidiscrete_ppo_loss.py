@@ -263,6 +263,7 @@ class MultidiscreteClipPPOLoss(PPOLoss):
 
         if self.entropy_bonus:
             entropy = self.get_entropy_bonus(dist)
+            entropy = torch.sum(entropy, dim=-2)
             td_out.set("entropy", entropy.detach().mean())  # for logging
             td_out.set("kl_approx", kl_approx.detach().mean())  # for logging
             td_out.set("loss_entropy", -self.entropy_coef * entropy)

@@ -12,7 +12,7 @@ logger:
   backend: wandb
   project_name: torchrl_ppo_discrete
   group_name: null
-  exp_name: ppo_discrete_multi_7
+  exp_name: ppo_discrete_multi_7_entropy_64
   test_interval: 1_000_000
   num_test_episodes: 5
   video: False
@@ -34,7 +34,7 @@ loss:
   clip_epsilon: 0.2
   anneal_clip_epsilon: False
   critic_coef: 0.25
-  entropy_coef: 0.0
+  entropy_coef: 0.01
   loss_critic_type: l2
 
 compile:

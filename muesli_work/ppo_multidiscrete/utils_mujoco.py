@@ -85,7 +85,7 @@ def make_ppo_models_state(proof_environment, device, cfg):
         in_features=input_shape[-1],
         activation_class=torch.nn.Tanh,
         out_features=torch.Size((action_dims, action_k)),  # for now.
-        num_cells=[128, 128],
+        num_cells=[64, 64],
         device=device,
     )
 

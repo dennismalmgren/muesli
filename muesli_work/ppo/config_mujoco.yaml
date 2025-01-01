@@ -1,6 +1,6 @@
 # task and env
 env:
-  env_name: HalfCheetah-v4
+  env_name: Hopper-v4
 
 # collector
 collector:
@@ -12,7 +12,7 @@ logger:
   backend: wandb
   project_name: torchrl_ppo_discrete
   group_name: null
-  exp_name: ppo_baseline_128
+  exp_name: ppo_baseline
   test_interval: 1_000_000
   num_test_episodes: 5
   video: False
