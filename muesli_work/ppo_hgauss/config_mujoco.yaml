@@ -1,6 +1,6 @@
 # task and env
 env:
-  env_name: Humanoid-v4
+  env_name: HalfCheetah-v4
 
 # collector
 collector:
@@ -12,7 +12,7 @@ logger:
   backend: wandb
   project_name: torchrl_ppo_discrete
   group_name: null
-  exp_name: ppo_hgauss_ordinal_w_6
+  exp_name: ppo_hgauss_ordinal
   test_interval: 1_000_000
   num_test_episodes: 5
   video: False
@@ -44,6 +44,6 @@ compile:
 
 models:
   vnbins: 101
-  vmin: -10
-  vmax: 200
+  vmin: -100
+  vmax: 1100
   ordinal_logits: True

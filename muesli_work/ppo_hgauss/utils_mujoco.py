@@ -127,7 +127,8 @@ def make_ppo_models_state(proof_environment, device, cfg):
             in_keys=["observation"],
             out_keys=["state_value_orig_logits"]
         )
-        ordinal_logits_module = OrdinalLogitsKernelModule(window_size=6)
+#        ordinal_logits_module = OrdinalLogitsKernelModule(window_size=6)
+        ordinal_logits_module = OrdinalLogitsModule()
         ordinal_logits_module = ordinal_logits_module.to(device)
         value_module_2 = TensorDictModule(
             module = ordinal_logits_module,

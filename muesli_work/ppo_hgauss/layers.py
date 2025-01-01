@@ -33,9 +33,8 @@ class OrdinalLogitsModule(torch.nn.Module):
         super().__init__()
 
     def forward(self, x):
-        sj = torch.sigmoid(x)
-        log_sj = torch.log(sj)
-        log_1_m_sj = torch.log(1 - sj)
+        log_sj = torch.nn.functional.logsigmoid(x)
+        log_1_m_sj = torch.nn.functional.logsigmoid(-x)
 
         logits_sum = torch.cumsum(log_sj, dim=-1)
         
