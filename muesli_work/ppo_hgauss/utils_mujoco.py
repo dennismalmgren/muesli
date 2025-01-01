@@ -121,31 +121,56 @@ def make_ppo_models_state(proof_environment, device, cfg):
     # Define value module
     support_network = SupportOperator(value_support)
     support_network = support_network.to(device)
-    value_module_1 = TensorDictModule(
-        module=value_mlp,
-        in_keys=["observation"],
-        out_keys=["state_value_orig_logits"]
-    )
-    ordinal_logits_module = OrdinalLogitsModule()
-    ordinal_logits_module = ordinal_logits_module.to(device)
-    value_module_2 = TensorDictModule(
-        module = ordinal_logits_module,
-        in_keys=["state_value_orig_logits"],
-        out_keys=["state_value_logits"]
-    )
+    if cfg.ordinal_logits:
+        value_module_1 = TensorDictModule(
+            module=value_mlp,
+            in_keys=["observation"],
+            out_keys=["state_value_orig_logits"]
+        )
+        ordinal_logits_module = OrdinalLogitsModule()
+        ordinal_logits_module = ordinal_logits_module.to(device)
+        value_module_2 = TensorDictModule(
+            module = ordinal_logits_module,
+            in_keys=["state_value_orig_logits"],
+            out_keys=["state_value_logits"]
+        )
 
-    value_module_3 = TensorDictModule(
-        module=support_network,
-        in_keys=["state_value_logits"],
-        out_keys=["state_value"]
-    )
+        value_module_3 = TensorDictModule(
+            module=support_network,
+            in_keys=["state_value_logits"],
+            out_keys=["state_value"]
+        )
 
-    value_module = TensorDictSequential(
-        value_module_1, 
-        value_module_2,
-        value_module_3
-    )
+        value_module = TensorDictSequential(
+            value_module_1, 
+            value_module_2,
+            value_module_3
+        )
+    else:
+        value_module_1 = TensorDictModule(
+            module=value_mlp,
+            in_keys=["observation"],
+            out_keys=["state_value_logits"]
+        )
+        #ordinal_logits_module = OrdinalLogitsModule()
+        #ordinal_logits_module = ordinal_logits_module.to(device)
+        #value_module_2 = TensorDictModule(
+        #    module = ordinal_logits_module,
+        #    in_keys=["state_value_orig_logits"],
+        #    out_keys=["state_value_logits"]
+        #)
 
+        value_module_3 = TensorDictModule(
+            module=support_network,
+            in_keys=["state_value_logits"],
+            out_keys=["state_value"]
+        )
+
+        value_module = TensorDictSequential(
+            value_module_1, 
+            #value_module_2,
+            value_module_3
+        )
     return policy_module, value_module, value_support
 
 

@@ -1,6 +1,6 @@
 # task and env
 env:
-  env_name: HalfCheetah-v4
+  env_name: Hopper-v4
 
 # collector
 collector:
@@ -46,3 +46,4 @@ models:
   vnbins: 101
   vmin: -100
   vmax: 1100
+  ordinal_logits: True
