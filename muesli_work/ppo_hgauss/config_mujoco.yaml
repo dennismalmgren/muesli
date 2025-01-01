@@ -1,6 +1,6 @@
 # task and env
 env:
-  env_name: Hopper-v4
+  env_name: Humanoid-v4
 
 # collector
 collector:
@@ -12,7 +12,7 @@ logger:
   backend: wandb
   project_name: torchrl_ppo_discrete
   group_name: null
-  exp_name: ppo_hgauss_ordinal
+  exp_name: ppo_hgauss_ordinal_w_6
   test_interval: 1_000_000
   num_test_episodes: 5
   video: False
@@ -44,6 +44,6 @@ compile:
 
 models:
   vnbins: 101
-  vmin: -100
-  vmax: 1100
+  vmin: -10
+  vmax: 200
   ordinal_logits: True
