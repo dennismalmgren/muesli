@@ -24,7 +24,7 @@ from torchrl.envs.libs.gym import GymEnv
 from torchrl.modules import MLP, ProbabilisticActor, TanhNormal, ValueOperator
 from torchrl.record import VideoRecorder
 
-from layers import SupportOperator, OrdinalLogitsModule, OrdinalLogitsKernelModule
+from layers import SupportOperator, OrdinalLogitsModule, OrdinalLogitsKernelModule, GaussianLogitsKernelModule
 
 # ====================================================================
 # Environment utils
@@ -112,7 +112,7 @@ def make_ppo_models_state(proof_environment, device, cfg):
     # Define value architecture
     value_mlp = MLP(
         in_features=input_shape[-1],
-        activation_class=torch.nn.Tanh, #todo: replace with something better
+        activation_class=torch.nn.Mish, #todo: replace with something better
         out_features=vnbins,
         num_cells=[64, 64],
         device=device,
@@ -128,7 +128,7 @@ def make_ppo_models_state(proof_environment, device, cfg):
             out_keys=["state_value_orig_logits"]
         )
         if cfg.window_size > 0:
-            ordinal_logits_module = OrdinalLogitsKernelModule(window_size=cfg.window_size)
+            ordinal_logits_module = GaussianLogitsKernelModule(window_size=cfg.window_size, stddev_scale=0.75)
         else:
             ordinal_logits_module = OrdinalLogitsModule()
         ordinal_logits_module = ordinal_logits_module.to(device)

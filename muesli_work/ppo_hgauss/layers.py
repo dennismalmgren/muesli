@@ -122,3 +122,77 @@ class OrdinalLogitsKernelModule(torch.nn.Module):
         # ------------------------------------------------
         logits = left_windowed + right_windowed
         return logits
+    
+    
+class GaussianLogitsKernelModule(torch.nn.Module):
+    def __init__(self, window_size=3, stddev_scale=0.75):
+        """
+        Args:
+            window_size (int): L in the [i-L..i] and [i+1..i+L] definition.
+            stddev_scale (float): Scaling factor for the Gaussian kernel's standard deviation.
+        """
+        super().__init__()
+        self.window_size = window_size
+        self.stddev_scale = stddev_scale
+
+    def gaussian_kernel(self, kernel_size, stddev):
+        """
+        Create a Gaussian kernel.
+
+        Args:
+            kernel_size (int): Size of the kernel (must be odd for symmetry).
+            stddev (float): Standard deviation of the Gaussian.
+
+        Returns:
+            torch.Tensor: 1D Gaussian kernel.
+        """
+        center = kernel_size // 2
+        positions = torch.arange(kernel_size).float() - center
+        kernel = torch.exp(-0.5 * (positions / stddev) ** 2)
+        kernel = kernel / kernel.sum()  # Normalize
+        return kernel
+
+    def forward(self, x):
+        """
+        x shape: [batch_size, num_classes]
+        """
+        # Compute log(sigmoid(x)) and log(1 - sigmoid(x))
+        log_sj = F.logsigmoid(x)
+        log_1_m_sj = F.logsigmoid(-x)
+
+        # Gaussian kernel parameters
+        stddev = self.stddev_scale
+        left_kernel_size = self.window_size + 1
+        right_kernel_size = self.window_size
+
+        # Create Gaussian kernels
+        left_gaussian_kernel = self.gaussian_kernel(left_kernel_size, stddev).to(x.device)
+        right_gaussian_kernel = self.gaussian_kernel(right_kernel_size, stddev).to(x.device)
+
+        # ------------------------------------------------
+        # 1) LEFT WINDOW: sum_{k=i-L.. i} of log(sigmoid(x_k))
+        # ------------------------------------------------
+        left_padding = (left_kernel_size - 1, 0)  # (pad_left, pad_right)
+        left_padded = F.pad(log_sj.unsqueeze(1), left_padding, mode="constant", value=0.0)
+        left_gaussian_kernel = left_gaussian_kernel.view(1, 1, -1)
+        left_windowed = F.conv1d(left_padded, left_gaussian_kernel, stride=1).squeeze(1)
+
+        # ------------------------------------------------
+        # 2) RIGHT WINDOW: sum_{k=i+1.. i+L} of log(1 - sigmoid(x_k))
+        # ------------------------------------------------
+        if right_kernel_size > 0:
+            right_padding = (0, right_kernel_size - 1)  # (pad_left, pad_right)
+            right_padded = F.pad(log_1_m_sj.unsqueeze(1), right_padding, mode="constant", value=0.0)
+            right_gaussian_kernel = right_gaussian_kernel.view(1, 1, -1)
+            right_windowed = F.conv1d(right_padded, right_gaussian_kernel, stride=1).squeeze(1)
+
+            # Shift by -1 to exclude the i-th term
+            right_windowed = torch.roll(right_windowed, shifts=-1, dims=-1)
+        else:
+            right_windowed = torch.zeros_like(log_sj)
+
+        # ------------------------------------------------
+        # 3) Combine
+        # ------------------------------------------------
+        logits = left_windowed + right_windowed
+        return logits
