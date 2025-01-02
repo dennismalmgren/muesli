@@ -105,6 +105,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
         actor_network=actor,
         critic_network=critic,
         support=support,
+        target_encoding=cfg.loss.target_encoding,
         clip_epsilon=cfg.loss.clip_epsilon,
         loss_critic_type=cfg.loss.loss_critic_type,
         entropy_coef=cfg.loss.entropy_coef,
