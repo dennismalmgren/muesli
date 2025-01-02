@@ -170,10 +170,12 @@ def main(cfg: "DictConfig"):  # noqa: F821
 
         # Backward pass
         total_loss.backward()
+        actor_grad_norm = torch.nn.utils.clip_grad_norm_(actor.parameters(), max_norm=1e6)
+        critic_grad_norm = torch.nn.utils.clip_grad_norm_(critic.parameters(), max_norm=1e6)
 
         # Update the networks
         optim.step()
-        return loss.detach().set("alpha", alpha), num_network_updates
+        return loss.detach().set("alpha", alpha), num_network_updates, actor_grad_norm, critic_grad_norm
 
     if cfg.compile.compile:
         update = compile_with_warmup(update, mode=compile_mode, warmup=1)
@@ -201,6 +203,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     cfg_logger_test_interval = cfg.logger.test_interval
     cfg_logger_num_test_episodes = cfg.logger.num_test_episodes
     losses = TensorDict(batch_size=[cfg_loss_ppo_epochs, num_mini_batches])
+    grad_norms = TensorDict(batch_size=[cfg_loss_ppo_epochs, num_mini_batches])
 
     collector_iter = iter(collector)
     total_iter = len(collector)
@@ -245,7 +248,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 for k, batch in enumerate(data_buffer):
                     with timeit("update"):
                         torch.compiler.cudagraph_mark_step_begin()
-                        loss, num_network_updates = update(
+                        loss, num_network_updates, actor_grad_norm, critic_grad_norm = update(
                             batch, num_network_updates=num_network_updates
                         )
                         loss = loss.clone()
@@ -253,11 +256,20 @@ def main(cfg: "DictConfig"):  # noqa: F821
                     losses[j, k] = loss.select(
                         "loss_critic", "loss_entropy", "loss_objective"
                     )
+                    grad_norms[j, k] = TensorDict({
+                        "actor_grad_norm": actor_grad_norm,
+                        "critic_grad_norm": critic_grad_norm
+                    })
 
         # Get training losses and times
         losses_mean = losses.apply(lambda x: x.float().mean(), batch_size=[])
+        grad_norms_mean = grad_norms.apply(lambda x: x.float().mean(), batch_size=[])
+
         for key, value in losses_mean.items():
             metrics_to_log.update({f"train/{key}": value.item()})
+        for key, value in grad_norms_mean.items():
+            metrics_to_log.update({f"train/{key}": value.item()})         
+
         metrics_to_log.update(
             {
                 "train/lr": loss["alpha"] * cfg_optim_lr,

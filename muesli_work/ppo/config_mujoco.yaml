@@ -1,6 +1,6 @@
 # task and env
 env:
-  env_name: Humanoid-v4
+  env_name: Hopper-v4
 
 # collector
 collector:
