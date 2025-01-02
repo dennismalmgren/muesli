@@ -16,7 +16,7 @@ logger:
   test_interval: 1_000_000
   num_test_episodes: 5
   video: False
-  mode: online
+  mode: disabled
 
 # Optim
 optim:
@@ -48,4 +48,5 @@ models:
   vmin: -10
   vmax: 200
   ordinal_logits: True
-  window_size: 3
+  window_size: -1
+  stddev_scale: 0.75

@@ -105,6 +105,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
         actor_network=actor,
         critic_network=critic,
         support=support,
+        stddev_scale=cfg.models.stddev_scale,
         target_encoding=cfg.loss.target_encoding,
         clip_epsilon=cfg.loss.clip_epsilon,
         loss_critic_type=cfg.loss.loss_critic_type,
@@ -204,7 +205,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
     cfg_logger_num_test_episodes = cfg.logger.num_test_episodes
     losses = TensorDict(batch_size=[cfg_loss_ppo_epochs, num_mini_batches])
     grad_norms = TensorDict(batch_size=[cfg_loss_ppo_epochs, num_mini_batches])
-
+    state_predictions = TensorDict(batch_size=[cfg_loss_ppo_epochs])
+    reward_100_collected = TensorDict(batch_size=[cfg_loss_ppo_epochs])
     collector_iter = iter(collector)
     total_iter = len(collector)
     for i in range(total_iter):
@@ -218,7 +220,9 @@ def main(cfg: "DictConfig"):  # noqa: F821
         collected_frames += frames_in_batch
         pbar.update(frames_in_batch)
 
-        # Get training rewards and episode lengths
+
+        # Get training rewards and episode lengths        
+        
         episode_rewards = data["next", "episode_reward"][data["next", "done"]]
         if len(episode_rewards) > 0:
             episode_length = data["next", "step_count"][data["next", "done"]]
@@ -239,6 +243,22 @@ def main(cfg: "DictConfig"):  # noqa: F821
                     data = adv_module(data)
                     if compile_mode:
                         data = data.clone()
+
+                #Get value predictions
+                episode_init = data["state_value"][data["is_init"]]
+                state_predictions[j] = TensorDict({
+                    "episode_value_prediction": episode_init
+                })
+                #episode_end_rewards = data["next", "episode_reward"][data["next", "done"]]
+                episode_end_steps = data["step_count"][data["next", "done"]]
+                episode_100_steps = torch.argwhere(data['step_count'] == 100)
+                episode_100_rewards = data["next", "episode_reward"][episode_100_steps[:, 0]].squeeze(-1)
+                episode_end_before_100 = torch.argwhere(episode_end_steps < 100)
+                relevant_episode_end_rewards = torch.gather(data["next", "episode_reward"][data["next", "done"]], dim=-1, index=episode_end_before_100.squeeze(-1))
+                episode_rewards_to_log = torch.cat((episode_100_rewards, relevant_episode_end_rewards))
+                reward_100_collected[j] = TensorDict({
+                    "episode_100_steps_value_obtained": episode_rewards_to_log
+                })
 
                 with timeit("rb - extend"):
                     # Update the data buffer
@@ -264,11 +284,16 @@ def main(cfg: "DictConfig"):  # noqa: F821
         # Get training losses and times
         losses_mean = losses.apply(lambda x: x.float().mean(), batch_size=[])
         grad_norms_mean = grad_norms.apply(lambda x: x.float().mean(), batch_size=[])
-
+        state_prediction_mean = state_predictions.apply(lambda x: x.float().mean(), batch_size=[])
+        reward_100_collected_mean = reward_100_collected.apply(lambda x: x.float().mean(), batch_size=[])
         for key, value in losses_mean.items():
             metrics_to_log.update({f"train/{key}": value.item()})
         for key, value in grad_norms_mean.items():
             metrics_to_log.update({f"train/{key}": value.item()})         
+        for key, value in state_prediction_mean.items():
+            metrics_to_log.update({f"train/{key}": value.item()})       
+        for key, value in reward_100_collected_mean.items():
+            metrics_to_log.update({f"train/{key}": value.item()})       
 
         metrics_to_log.update(
             {

@@ -123,7 +123,12 @@ class OrdinalLogitsKernelModule(torch.nn.Module):
         logits = left_windowed + right_windowed
         return logits
     
+<<<<<<< HEAD
     
+=======
+
+
+>>>>>>> 8961c9e11e6a61b40c80d0d7bfce6f855ff58866
 class GaussianLogitsKernelModule(torch.nn.Module):
     def __init__(self, window_size=3, stddev_scale=0.75):
         """
