@@ -33,13 +33,10 @@ cd /proj/berzelius-aiics-real/users/x_denma/
 # For generating random trajectories cmd="apptainer exec --env WANDB_API_KEY='f832ecbebaa081e6438201bd475fe26f9f0b1d82' --nv -B projs/muesli:/app berzdev_latest.sif bash -c 'cd /app/path_integration_module && python generate_random_trajectories.py'"
 
 # For training predictors 
-internal_cmd="energy_prediction.from_source=current_state energy_prediction.delta=none energy_prediction.num_place_cells=256 energy_prediction.num_head_cells=12 energy_prediction.predict_state_mse=False artefacts.model_save_dir=current_state_none_energy_place_256_head_12_dropout_humanoid_v5 logger.group_name=current_state_none_energy_place_256_head_12_dropout_humanoid_v5"
-
 # For training predictors 
-cmd="apptainer exec --env WANDB_API_KEY='f832ecbebaa081e6438201bd475fe26f9f0b1d82' --nv -B projs/muesli:/app berzdev_latest.sif bash -c 'cd /app/path_integration_module && python train_energy_predictor.py $internal_cmd'"
+cmd="apptainer exec --env WANDB_API_KEY='f832ecbebaa081e6438201bd475fe26f9f0b1d82' --nv -B projs/muesli:/app berzdev_latest.sif bash -c 'cd /app && python -m cont_actions.rnad_cont_actions_blotto_expectation2'"
 
 # for training solver 
-model="current_state_none_energy_place_256_dropout_humanoid_v5"
 
 # for training solver internal_cmd="energy_prediction.model_save_dir=$model logger.group_name=$model"
 # for training solver cmd="apptainer exec --env WANDB_API_KEY='f832ecbebaa081e6438201bd475fe26f9f0b1d82' --nv -B projs/muesli:/app berzdev_latest.sif bash -c 'cd /app/ppo_grid && python ppo_grid.py $internal_cmd'"
