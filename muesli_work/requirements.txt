@@ -1,0 +1,5 @@
+gymnasium[mujoco]==0.29.1
+tqdm
+wandb
+hydra-core>=1.1
+hydra-submitit-launcher

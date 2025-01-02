@@ -160,6 +160,7 @@ class QOrdinalClipPPOLoss(PPOLoss):
         actor_network: ProbabilisticTensorDictSequential | None = None,
         critic_network: TensorDictModule | None = None,
         support: Tensor = None,
+        target_encoding: str = None,
         *,
         clip_epsilon: float = 0.2,
         entropy_bonus: bool = True,
@@ -198,6 +199,7 @@ class QOrdinalClipPPOLoss(PPOLoss):
             break
         else:
             device = None
+        self.target_encoding = target_encoding
         self.register_buffer("clip_epsilon", torch.tensor(clip_epsilon, device=device))
         self.register_buffer("support", support.to(device))
         atoms = self.support.numel()
@@ -341,8 +343,10 @@ class QOrdinalClipPPOLoss(PPOLoss):
                 f"Make sure that the value_key passed to PPO is accurate."
             )
         
-        #target_return_projected = self._two_hot(target_return, self.support)
-        target_return_projected = self._hgauss(target_return)
+        if self.target_encoding == "hgauss":
+            target_return_projected = self._hgauss(target_return)
+        else:
+            target_return_projected = self._two_hot(target_return)
         state_value_logits = state_value_td.get("state_value_logits")
         loss_value = torch.nn.functional.cross_entropy(state_value_logits, target_return_projected, reduction="none")
 

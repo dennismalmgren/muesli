@@ -47,3 +47,4 @@ models:
   vmin: -100
   vmax: 1100
   ordinal_logits: True
+  window_size: 6
