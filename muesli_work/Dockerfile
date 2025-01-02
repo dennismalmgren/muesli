@@ -12,8 +12,11 @@ RUN apt-get install -y g++
 #RUN sudo apt-get install -y libsdl2-dev libfreetype6-dev libsdl-image1.2-dev libsdl-mixer1.2-dev libsdl-ttf2.0-dev
 #RUN sudo apt-get install -y python3-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev libsdl2-dev libsmpeg-dev python3-numpy subversion libportmidi-dev ffmpeg libswscale-dev libavformat-dev libavcodec-dev libfreetype6-dev
 #RUN sudo apt-get install -y libjpeg-dev
+RUN apt-get install -y git
 
 RUN pip install --upgrade pip
+RUN pip install -U --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
+
 WORKDIR /repos
 RUN git clone https://github.com/pytorch/rl.git
 WORKDIR /repos/rl

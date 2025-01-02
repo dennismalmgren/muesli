@@ -160,6 +160,7 @@ class QOrdinalClipPPOLoss(PPOLoss):
         actor_network: ProbabilisticTensorDictSequential | None = None,
         critic_network: TensorDictModule | None = None,
         support: Tensor = None,
+        stddev_scale: float = 0.75,
         target_encoding: str = None,
         *,
         clip_epsilon: float = 0.2,
@@ -207,7 +208,7 @@ class QOrdinalClipPPOLoss(PPOLoss):
         Vmax = self.support.max()
         delta_z = (Vmax - Vmin) / (atoms - 1)
         self.register_buffer(
-            "stddev", (0.75 * delta_z).unsqueeze(-1)
+            "stddev", (stddev_scale * delta_z).unsqueeze(-1)
         )
         self.register_buffer(
             "support_plus",
