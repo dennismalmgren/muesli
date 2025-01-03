@@ -50,3 +50,4 @@ class OrdinalLogitsModule(torch.nn.Module):
         logits = logits_sum
         logits[..., :-1] += logits_inv_sum[..., 1:]
         return logits
+    

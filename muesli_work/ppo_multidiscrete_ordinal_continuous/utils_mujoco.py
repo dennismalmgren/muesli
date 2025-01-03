@@ -8,6 +8,7 @@ import itertools
 import torch.nn
 import torch.optim
 from torch.distributions import Categorical
+from torch.nn import Embedding, Flatten
 
 from tensordict.nn import AddStateIndependentNormalScale, TensorDictModule, TensorDictSequential
 from torchrl.envs import (
@@ -23,7 +24,7 @@ from torchrl.envs.libs.gym import GymEnv
 from torchrl.modules import MLP, ProbabilisticActor, TanhNormal, ValueOperator, OneHotCategorical
 from torchrl.record import VideoRecorder
 
-from layers import OrdinalLogitsModule
+from layers import OrdinalLogitsModule, ClampOperator
 
 # ====================================================================
 # Environment utils
@@ -68,12 +69,15 @@ def define_uniform_grid_anchors(action_low, action_high, K_actions):
 
 def make_ppo_models_state(proof_environment, device, cfg):
 
+    action_embedding_dim=8
+
     # Define input shape
     input_shape = proof_environment.observation_spec["observation"].shape
     action_dims = proof_environment.action_spec_unbatched.shape[-1]
     # Define policy output distribution class
     action_k = cfg.k_actions
     anchors = define_uniform_grid_anchors(proof_environment.action_spec_unbatched.space.low, proof_environment.action_spec_unbatched.space.high, action_k).to(device)
+    half_bin_sizes = 0.5 * (anchors[:, 1] - anchors[:, 0])
     distribution_class = Categorical
     distribution_kwargs = {
 
@@ -128,13 +132,67 @@ def make_ppo_models_state(proof_environment, device, cfg):
         default_interaction_type=ExplorationType.RANDOM,
     )
 
-    policy_projection = TensorDictModule(
-        lambda x: anchors.gather(dim=-1, index=x.unsqueeze(-1)).squeeze(-1),
+
+
+    action_embedding = Embedding(num_embeddings=action_k, embedding_dim=action_embedding_dim, device=device)
+
+    action_embedding_module = TensorDictModule(
+        module=torch.nn.Sequential(action_embedding, Flatten(-2, -1)),
         in_keys=["discrete_action"],
+        out_keys=["embedded_action"]
+    )
+
+    continuous_action_network = MLP(
+        in_features = input_shape[-1] + action_dims * action_embedding_dim,
+        activation_class = torch.nn.Tanh,
+        num_cells=[64, 64],
+        out_features = action_dims,
+        device=device
+    )
+    # Initialize policy weights
+    for layer in continuous_action_network.modules():
+        if isinstance(layer, torch.nn.Linear):
+            torch.nn.init.orthogonal_(layer.weight, 1.0)
+            layer.bias.data.zero_()
+
+    continuous_action_module = TensorDictSequential(
+        action_embedding_module,
+        TensorDictModule(module=continuous_action_network, in_keys=["observation", "embedded_action"], out_keys=["loc"]),
+        TensorDictModule(module=
+                         torch.nn.Sequential(
+                             ClampOperator(vmin=-100.0, vmax=100.0),
+        AddStateIndependentNormalScale(
+            action_dims, scale_lb=1e-8,
+        ).to(device)),
+        in_keys=["loc"], out_keys=["loc", "scale"]),
+    )
+
+    continuous_action_distribution_class = TanhNormal
+    continuous_action_distribution_kwargs = {
+        "low": -torch.ones(action_dims, device=device),
+        "high": torch.ones(action_dims, device=device),
+        "tanh_loc": False,
+    }
+
+    continuous_policy_module = ProbabilisticActor(
+        module=continuous_action_module,
+        in_keys=["loc", "scale"],
+        out_keys=["continuous_action"],
+        #spec=proof_environment.full_action_spec_unbatched.to(device),
+        distribution_class=continuous_action_distribution_class,
+        distribution_kwargs=continuous_action_distribution_kwargs,
+        return_log_prob=True,
+        default_interaction_type=ExplorationType.RANDOM,
+        log_prob_key="sample_continuous_log_prob"
+    )
+
+    policy_projection = TensorDictModule(
+        lambda x, y: torch.clamp(anchors.gather(dim=-1, index=x.unsqueeze(-1)).squeeze(-1) + y * half_bin_sizes, -1.0, 1.0),
+        in_keys=["discrete_action", "continuous_action"],
         out_keys=["action"]
     )
 
-    policy_module = TensorDictSequential(discrete_policy_module, policy_projection)
+    policy_module = TensorDictSequential(discrete_policy_module, continuous_policy_module, policy_projection)
     # Define value architecture
     value_mlp = MLP(
         in_features=input_shape[-1],
@@ -156,13 +214,13 @@ def make_ppo_models_state(proof_environment, device, cfg):
         in_keys=["observation"],
     )
 
-    return policy_module, value_module, discrete_policy_module
+    return policy_module, value_module, discrete_policy_module, continuous_policy_module
 
 
 def make_ppo_models(env_name, device, cfg):
     proof_environment = make_env(env_name, device=device)
-    actor, critic, discrete_policy_module = make_ppo_models_state(proof_environment, device=device, cfg=cfg)
-    return actor, critic, discrete_policy_module
+    actor, critic, discrete_policy_module, continuous_policy_module = make_ppo_models_state(proof_environment, device=device, cfg=cfg)
+    return actor, critic, discrete_policy_module, continuous_policy_module
 
 
 # ====================================================================

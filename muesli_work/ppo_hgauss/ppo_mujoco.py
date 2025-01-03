@@ -259,7 +259,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 reward_100_collected[j] = TensorDict({
                     "episode_100_steps_value_obtained": episode_rewards_to_log
                 })
-
+                #todo: log entropies of value function and policy
+                
                 with timeit("rb - extend"):
                     # Update the data buffer
                     data_reshape = data.reshape(-1)

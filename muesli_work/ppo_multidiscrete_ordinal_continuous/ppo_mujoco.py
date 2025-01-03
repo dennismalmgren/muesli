@@ -64,7 +64,13 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 compile_mode = "reduce-overhead"
 
     # Create models (check utils_mujoco.py)
-    actor, critic, discrete_policy_module = make_ppo_models(cfg.env.env_name, device=device, cfg=cfg.models)
+    actor, critic, discrete_policy_module, continuous_policy_module = make_ppo_models(cfg.env.env_name, device=device, cfg=cfg.models)
+
+    # test_env = make_env(cfg.env.env_name, device, from_pixels=False)
+
+
+    # starter_td = test_env.reset()
+    # starter_td = actor(starter_td.to(device))
 
     # Create collector
     collector = SyncDataCollector(
@@ -102,7 +108,9 @@ def main(cfg: "DictConfig"):  # noqa: F821
     )
 
     loss_module = MultidiscreteClipPPOLoss(
-        actor_network=discrete_policy_module,
+        actor_network=actor,
+        discrete_actor_network=discrete_policy_module,
+        continuous_actor_network=continuous_policy_module,
         critic_network=critic,
         clip_epsilon=cfg.loss.clip_epsilon,
         loss_critic_type=cfg.loss.loss_critic_type,
@@ -251,7 +259,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
                         loss = loss.clone()
                     num_network_updates = num_network_updates.clone()
                     losses[j, k] = loss.select(
-                        "loss_critic", "loss_entropy", "loss_objective"
+                        "loss_critic", "loss_entropy", "loss_objective", "loss_discrete", "loss_continuous"
                     )
 
         # Get training losses and times

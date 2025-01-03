@@ -149,14 +149,23 @@ class MultidiscreteClipPPOLoss(PPOLoss):
 
     actor_network: TensorDictModule
     critic_network: TensorDictModule
+    discrete_actor_network: TensorDictModule
+    continuous_actor_network: TensorDictModule
+    discrete_actor_network_params: TensorDictParams
+    continuous_actor_network_params: TensorDictParams
     actor_network_params: TensorDictParams
     critic_network_params: TensorDictParams
     target_actor_network_params: TensorDictParams
     target_critic_network_params: TensorDictParams
+    target_discrete_actor_network_params: TensorDictParams    
+    target_continuous_actor_network_params: TensorDictParams
+
 
     def __init__(
         self,
         actor_network: ProbabilisticTensorDictSequential | None = None,
+        discrete_actor_network: ProbabilisticTensorDictSequential | None = None,
+        continuous_actor_network: ProbabilisticTensorDictSequential | None = None,
         critic_network: TensorDictModule | None = None,
         *,
         clip_epsilon: float = 0.2,
@@ -197,6 +206,10 @@ class MultidiscreteClipPPOLoss(PPOLoss):
         else:
             device = None
         self.register_buffer("clip_epsilon", torch.tensor(clip_epsilon, device=device))
+#        self.discrete_actor_network = discrete_actor_network
+#        self.continuous_actor_network = continuous_actor_network
+        self.convert_to_functional(discrete_actor_network, "discrete_actor_network")
+        self.convert_to_functional(continuous_actor_network, "continuous_actor_network")
 
     @property
     def _clip_bounds(self):
@@ -239,7 +252,8 @@ class MultidiscreteClipPPOLoss(PPOLoss):
             scale = advantage.std().clamp_min(1e-6)
             advantage = (advantage - loc) / scale
 
-        log_weight, dist, kl_approx = self._log_weight(tensordict)
+        ############### DISCRETE LOSS
+        log_weight, dist, kl_approx = self._discrete_log_weight(tensordict)
         log_weight = torch.sum(log_weight, dim=-2)
         # ESS for logging
         with torch.no_grad():
@@ -258,9 +272,45 @@ class MultidiscreteClipPPOLoss(PPOLoss):
         gain2 = ratio * advantage
 
         gain = torch.stack([gain1, gain2], -1).min(dim=-1)[0]
-        td_out = TensorDict({"loss_objective": -gain}, batch_size=[])
-        td_out.set("clip_fraction", clip_fraction)
+        loss_discrete = -gain
+        
+        ############### CONTINUOUS LOSS
+        log_weight, dist, kl_approx = self._discrete_log_weight(tensordict)
+        log_weight = torch.sum(log_weight, dim=-2)
+        # ESS for logging
+        with torch.no_grad():
+            # In theory, ESS should be computed on particles sampled from the same source. Here we sample according
+            # to different, unrelated trajectories, which is not standard. Still it can give a idea of the dispersion
+            # of the weights.
+            lw = log_weight.squeeze()
+            ess = (2 * lw.logsumexp(0) - (2 * lw).logsumexp(0)).exp()
+            batch = log_weight.shape[0]
 
+        gain1 = log_weight.exp() * advantage
+
+        log_weight_clip = log_weight.clamp(*self._clip_bounds)
+        clip_fraction = (log_weight_clip != log_weight).to(log_weight.dtype).mean()
+        ratio = log_weight_clip.exp()
+        gain2 = ratio * advantage
+
+        loss_discrete = -torch.stack([gain1, gain2], -1).min(dim=-1)[0]
+        
+        log_weight, dist, kl_approx = self._continuous_log_weight(tensordict)
+
+        gain1 = log_weight.exp() * advantage
+
+        log_weight_clip = log_weight.clamp(*self._clip_bounds)
+        clip_fraction = (log_weight_clip != log_weight).to(log_weight.dtype).mean()
+        ratio = log_weight_clip.exp()
+        gain2 = ratio * advantage
+
+        loss_continuous = -torch.stack([gain1, gain2], -1).min(dim=-1)[0]
+        
+        td_out = TensorDict({"loss_objective": loss_discrete + loss_continuous}, batch_size=[])
+        td_out.set("clip_fraction", clip_fraction)
+        td_out.set("loss_discrete", loss_discrete)
+        td_out.set("loss_continuous", loss_continuous)
+        
         if self.entropy_bonus:
             entropy = self.get_entropy_bonus(dist)
             entropy = entropy.sum(-2)
@@ -281,3 +331,91 @@ class MultidiscreteClipPPOLoss(PPOLoss):
             batch_size=[],
         )
         return td_out
+
+    def _discrete_log_weight(
+        self, tensordict: TensorDictBase
+    ) -> Tuple[torch.Tensor, d.Distribution]:
+        # current log_prob of actions
+        action = tensordict.get("discrete_action")
+
+        with self.discrete_actor_network_params.to_module(
+            self.discrete_actor_network
+        ) if self.functional else contextlib.nullcontext():
+            dist = self.discrete_actor_network.get_dist(tensordict)
+
+        prev_log_prob = tensordict.get(self.tensor_keys.sample_log_prob)
+        if prev_log_prob.requires_grad:
+            raise RuntimeError(
+                f"tensordict stored {self.tensor_keys.sample_log_prob} requires grad."
+            )
+
+        if action.requires_grad:
+            raise RuntimeError(
+                f"tensordict stored {self.tensor_keys.action} requires grad."
+            )
+        if isinstance(action, torch.Tensor):
+            log_prob = dist.log_prob(action)
+        else:
+            if isinstance(dist, CompositeDistribution):
+                is_composite = True
+                kwargs = {
+                    "inplace": False,
+                    "aggregate_probabilities": False,
+                    "include_sum": False,
+                }
+            else:
+                is_composite = False
+                kwargs = {}
+            log_prob = dist.log_prob(tensordict, **kwargs)
+            if is_composite and not isinstance(prev_log_prob, TensorDict):
+                log_prob = _sum_td_features(log_prob)
+                log_prob.view_as(prev_log_prob)
+
+        log_weight = (log_prob - prev_log_prob).unsqueeze(-1)
+        kl_approx = (prev_log_prob - log_prob).unsqueeze(-1)
+
+        return log_weight, dist, kl_approx
+
+    def _continuous_log_weight(
+        self, tensordict: TensorDictBase
+    ) -> Tuple[torch.Tensor, d.Distribution]:
+        # current log_prob of actions
+        action = tensordict.get("continuous_action")
+
+        with self.continuous_actor_network_params.to_module(
+            self.continuous_actor_network
+        ) if self.functional else contextlib.nullcontext():
+            dist = self.continuous_actor_network.get_dist(tensordict)
+
+        prev_log_prob = tensordict.get("sample_continuous_log_prob")
+        if prev_log_prob.requires_grad:
+            raise RuntimeError(
+                f"tensordict stored sample_continuous_log_prob requires grad."
+            )
+
+        if action.requires_grad:
+            raise RuntimeError(
+                f"tensordict stored {self.tensor_keys.action} requires grad."
+            )
+        if isinstance(action, torch.Tensor):
+            log_prob = dist.log_prob(action)
+        else:
+            if isinstance(dist, CompositeDistribution):
+                is_composite = True
+                kwargs = {
+                    "inplace": False,
+                    "aggregate_probabilities": False,
+                    "include_sum": False,
+                }
+            else:
+                is_composite = False
+                kwargs = {}
+            log_prob = dist.log_prob(tensordict, **kwargs)
+            if is_composite and not isinstance(prev_log_prob, TensorDict):
+                log_prob = _sum_td_features(log_prob)
+                log_prob.view_as(prev_log_prob)
+
+        log_weight = (log_prob - prev_log_prob).unsqueeze(-1)
+        kl_approx = (prev_log_prob - log_prob).unsqueeze(-1)
+
+        return log_weight, dist, kl_approx
