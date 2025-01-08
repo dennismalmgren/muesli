@@ -36,7 +36,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
     from torchrl.record.loggers import generate_exp_name, get_logger
     from utils_sokoban import eval_model, make_parallel_env, make_ppo_models
     from torchrl.envs.utils import step_mdp
-
+    import gym_sokoban
+    
     torch.set_float32_matmul_precision("high")
 
     device = cfg.optim.device
@@ -64,7 +65,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 compile_mode = "reduce-overhead"
 
     # Create models (check utils_atari.py)
-    actor, critic = make_ppo_models(device=device)
+    actor, critic, recurrent_module = make_ppo_models(cfg, device=device)
     # p_env = make_parallel_env(cfg.env.num_envs, device)
     # td_ = p_env.reset()
     # done = td_["done"]
@@ -77,7 +78,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
 
     # Create collector
     collector = SyncDataCollector(
-        create_env_fn=make_parallel_env(cfg.env.num_envs, device),
+        create_env_fn=make_parallel_env(cfg.env.num_envs, cfg.env.env_name, device, 
+                                        transform=recurrent_module.make_tensordict_primer()),
         policy=actor,
         frames_per_batch=frames_per_batch,
         total_frames=total_frames,
@@ -88,7 +90,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     )
 
     # Create data buffer
-    sampler = SamplerWithoutReplacement()
+    sampler = SamplerWithoutReplacement(shuffle=False)
     data_buffer = TensorDictReplayBuffer(
         storage=LazyTensorStorage(
             frames_per_batch, compilable=cfg.compile.compile, device=device
@@ -105,7 +107,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
         value_network=critic,
         average_gae=False,
         device=device,
-        vectorized=False #not cfg.compile.compile,
+        vectorized=not cfg.compile.compile,
     )
     loss_module = ClipPPOLoss(
         actor_network=actor,
@@ -136,6 +138,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 "config": dict(cfg),
                 "project": cfg.logger.project_name,
                 "group": cfg.logger.group_name,
+                "mode": cfg.logger.mode,
             },
         )
         logger_video = cfg.logger.video
@@ -143,7 +146,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
         logger_video = False
 
     # Create test environment
-    test_env = make_parallel_env(1, device, is_test=True)
+    test_env = make_parallel_env(1, cfg.env.env_name, device, is_test=True, transform=recurrent_module.make_tensordict_primer())
     if logger_video:
         test_env = test_env.append_transform(
             VideoRecorder(logger, tag="rendering/test", in_keys=["pixels_int"])
@@ -224,12 +227,11 @@ def main(cfg: "DictConfig"):  # noqa: F821
         pbar.update(frames_in_batch)
 
         # Get training rewards and episode lengths['params', 'num_boxes']
-        episode_rewards = data["next", "episode_reward"][data["next", "terminated"]]
+        episode_rewards = data["next", "episode_reward"][data["next", "done"]]
         if len(episode_rewards) > 0:
-            episode_length = data["next", "step_count"][data["next", "terminated"]]
-            
-            episode_initial_status = data['next', 'params', 'num_boxes'].unsqueeze(-1)[data["next", "terminated"]]
-            episode_completion_status = data['next', 'boxes_on_target'][data["next", "terminated"]]
+            episode_length = data["next", "step_count"][data["next", "done"]]
+            episode_initial_status = data['num_boxes'].unsqueeze(-1)[data["next", "done"]]
+            episode_completion_status = data['next', 'boxes_on_target'].unsqueeze(-1)[data["next", "done"]]
             episode_to_go = episode_initial_status - episode_completion_status
             episodes_completed = (episode_to_go == 0).float().sum().item()
             episode_partial_completion = episode_completion_status / episode_initial_status

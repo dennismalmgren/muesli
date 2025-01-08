@@ -1,19 +1,20 @@
 # task and env
 env:
-  env_name: CartPole-v1
+  env_name: HalfCheetah-v4
 
 # collector
 collector:
-  frames_per_batch: 128
+  frames_per_batch: 2048
   total_frames: 1_000_000
 
 # logger
 logger:
   backend: wandb
-  project_name: ppo_recurrent
+  project_name: kalman_prediction
   group_name: null
-  exp_name: baseline
-  test_interval: 50_000
+  exp_name: no_reward
+  test_interval: 100_000
+  save_interval: 10_000
   num_test_episodes: 5
   video: False
   mode: online
@@ -22,21 +23,23 @@ logger:
 optim:
   lr: 3e-4
   weight_decay: 0.0
-  anneal_lr: False
-  device:
+  anneal_lr: True
+  device: cpu
 
 # loss
 loss:
   gamma: 0.99
-  mini_batch_size: 16
+  mini_batch_size: 64
   ppo_epochs: 10
   gae_lambda: 0.95
   clip_epsilon: 0.2
   anneal_clip_epsilon: False
-  critic_coef: 0.5
+  critic_coef: 0.25
   entropy_coef: 0.0
+  kalman_coef: 0.001
   loss_critic_type: l2
-
+  add_kalman_reward: False
+  
 compile:
   compile: False
   compile_mode:

@@ -28,18 +28,14 @@ def main(cfg: "DictConfig"):  # noqa: F821
     from torchrl._utils import timeit
     from torchrl.collectors import SyncDataCollector
     from torchrl.data import LazyTensorStorage, TensorDictReplayBuffer
-    from torchrl.envs.utils import step_mdp, check_env_specs
-    #from torchrl.data.replay_buffers.samplers import SamplerWithoutReplacement
-    from torchrl.data.replay_buffers.samplers import SamplerWithoutReplacement, SliceSamplerWithoutReplacement
+    from torchrl.data.replay_buffers.samplers import SamplerWithoutReplacement
     from torchrl.envs import ExplorationType, set_exploration_type
     from torchrl.objectives import group_optimizers
     from torchrl.objectives.value.advantages import GAE
     from torchrl.record import VideoRecorder
     from torchrl.record.loggers import generate_exp_name, get_logger
-    from utils_mujoco import eval_model, make_env, make_ppo_models
+    from utils_mujoco import eval_model, make_env, make_ppo_models, load_model_state
     from ppo_loss import ClipPPOLoss
-    from torchrl.modules import set_recurrent_mode
-
     torch.set_float32_matmul_precision("high")
 
     device = cfg.optim.device
@@ -48,9 +44,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
             device = "cuda:0"
         else:
             device = "cpu"
-    #device = "cpu"
     device = torch.device(device)
-    
+
     num_mini_batches = cfg.collector.frames_per_batch // cfg.loss.mini_batch_size
     total_network_updates = (
         (cfg.collector.total_frames // cfg.collector.frames_per_batch)
@@ -68,19 +63,52 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 compile_mode = "reduce-overhead"
 
     # Create models (check utils_mujoco.py)
-    actor, critic, encoder_module, rnn = make_ppo_models(cfg.env.env_name, device=device)
+    actor, critic, policy, kalman = make_ppo_models(cfg.env.env_name, device=device)
+    
+    # Create optimizers
+    actor_optim = torch.optim.Adam(
+        policy.parameters(), lr=torch.tensor(cfg.optim.lr, device=device), eps=1e-5
+    )
+    critic_optim = torch.optim.Adam(
+        critic.parameters(), lr=torch.tensor(cfg.optim.lr, device=device), eps=1e-5
+    )
+    kalman_optim = torch.optim.Adam(
+        kalman.parameters(), lr=torch.tensor(cfg.optim.lr * 0.1, device=device), eps=1e-5
+    )
+    optim = group_optimizers(actor_optim, critic_optim,  kalman_optim)
+    del actor_optim, critic_optim, kalman_optim
 
-    #train_env = make_env(cfg.env.env_name, device, rnn=rnn)
-    #td = train_env.reset()
-    # encoder_module(td)
-    # rnn(td)
-    # td = train_env.step(td)
+    collected_frames = 0
+    loaded_frames = 0
+
+    load_model = False
+    if load_model:
+        model_dir="2025-01-08/01-07-38/"
+        model_name = "training_snapshot_12288"
+        loaded_state = load_model_state(model_name, model_dir)
+
+        policy_state = loaded_state['model_policy']
+        critic_state = loaded_state['model_critic']
+        kalman_state = loaded_state['model_kalman']
+        optim_state = loaded_state['optimizer_state']
+
+        collected_frames = loaded_state['collected_frames']['collected_frames']
+        loaded_frames = collected_frames
+        policy.load_state_dict(policy_state)
+        critic.load_state_dict(critic_state)
+        kalman.load_state_dict(kalman_state)
+        optim.load_state_dict(optim_state)
+
+    frames_remaining = cfg.collector.total_frames - collected_frames
+
+
+
     # Create collector
     collector = SyncDataCollector(
-        create_env_fn=make_env(cfg.env.env_name, device, rnn=rnn),
+        create_env_fn=make_env(cfg.env.env_name, device),
         policy=actor,
         frames_per_batch=cfg.collector.frames_per_batch,
-        total_frames=cfg.collector.total_frames,
+        total_frames=frames_remaining,
         device=device,
         max_frames_per_traj=-1,
         compile_policy={"mode": compile_mode, "warmup": 1} if compile_mode else False,
@@ -88,7 +116,6 @@ def main(cfg: "DictConfig"):  # noqa: F821
     )
 
     # Create data buffer
-    #sampler = SliceSamplerWithoutReplacement(num_slices=4, strict_length=False)
     sampler = SamplerWithoutReplacement(shuffle=False)
     data_buffer = TensorDictReplayBuffer(
         storage=LazyTensorStorage(
@@ -112,24 +139,20 @@ def main(cfg: "DictConfig"):  # noqa: F821
     )
 
     loss_module = ClipPPOLoss(
-        actor_network=actor,
+        actor_network=policy,
         critic_network=critic,
+        kalman_network=kalman,
         clip_epsilon=cfg.loss.clip_epsilon,
         loss_critic_type=cfg.loss.loss_critic_type,
         entropy_coef=cfg.loss.entropy_coef,
         critic_coef=cfg.loss.critic_coef,
+        kalman_coef=cfg.loss.kalman_coef,
         normalize_advantage=True,
     )
 
-    # Create optimizers
-    actor_optim = torch.optim.Adam(
-        actor.parameters(), lr=torch.tensor(cfg.optim.lr, device=device), eps=1e-5
-    )
-    critic_optim = torch.optim.Adam(
-        critic.parameters(), lr=torch.tensor(cfg.optim.lr, device=device), eps=1e-5
-    )
-    optim = group_optimizers(actor_optim, critic_optim)
-    del actor_optim, critic_optim
+
+
+
 
     # Create logger
     logger = None
@@ -151,7 +174,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
         logger_video = False
 
     # Create test environment
-    test_env = make_env(cfg.env.env_name, device, from_pixels=logger_video, rnn=rnn)
+    test_env = make_env(cfg.env.env_name, device, from_pixels=logger_video)
     if logger_video:
         test_env = test_env.append_transform(
             VideoRecorder(logger, tag="rendering/test", in_keys=["pixels"])
@@ -174,7 +197,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
         loss = loss_module(batch)
         critic_loss = loss["loss_critic"]
         actor_loss = loss["loss_objective"] + loss["loss_entropy"]
-        total_loss = critic_loss + actor_loss
+        kalman_loss = loss["loss_kalman"]
+        total_loss = critic_loss + actor_loss + kalman_loss
 
         # Backward pass
         total_loss.backward()
@@ -207,6 +231,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     cfg_loss_anneal_clip_eps = cfg.loss.anneal_clip_epsilon
     cfg_loss_clip_epsilon = cfg.loss.clip_epsilon
     cfg_logger_test_interval = cfg.logger.test_interval
+    cfg_logger_save_interval = cfg.logger.save_interval
     cfg_logger_num_test_episodes = cfg.logger.num_test_episodes
     losses = TensorDict(batch_size=[cfg_loss_ppo_epochs, num_mini_batches])
 
@@ -214,8 +239,13 @@ def main(cfg: "DictConfig"):  # noqa: F821
     total_iter = len(collector)
     for i in range(total_iter):
         timeit.printevery(1000, total_iter, erase=True)
-        with timeit("collecting"), torch.no_grad():
+
+        with timeit("collecting"):
             data = next(collector_iter)
+            #total hack
+            #only do after some warmup?
+            #if cfg.loss.add_kalman_reward:
+            #    data["next", "reward"] -= 0.01 * torch.square(data["prediction_error"]).sum(-1, keepdim=True)
         metrics_to_log = {}
         frames_in_batch = data.numel()
         collected_frames += frames_in_batch
@@ -257,7 +287,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
                         loss = loss.clone()
                     num_network_updates = num_network_updates.clone()
                     losses[j, k] = loss.select(
-                        "loss_critic", "loss_entropy", "loss_objective"
+                        "loss_critic", "loss_entropy", "loss_objective", "loss_kalman"
                     )
 
         # Get training losses and times
@@ -277,8 +307,8 @@ def main(cfg: "DictConfig"):  # noqa: F821
         with torch.no_grad(), set_exploration_type(
             ExplorationType.DETERMINISTIC
         ), timeit("eval"):
-            if ((i - 1) * frames_in_batch) // cfg_logger_test_interval < (
-                i * frames_in_batch
+            if ((i - 1) * frames_in_batch + loaded_frames) // cfg_logger_test_interval < (
+               (i * frames_in_batch + loaded_frames)
             ) // cfg_logger_test_interval:
                 actor.eval()
                 test_rewards = eval_model(
@@ -290,6 +320,17 @@ def main(cfg: "DictConfig"):  # noqa: F821
                     }
                 )
                 actor.train()
+
+            if ((i - 1) * frames_in_batch + loaded_frames) // cfg_logger_save_interval < \
+                (i * frames_in_batch + loaded_frames) // cfg_logger_save_interval:
+                    savestate = {
+                            'model_policy': policy.state_dict(),
+                            'model_critic': critic.state_dict(),
+                            'model_kalman': kalman.state_dict(),
+                            'optimizer_state': optim.state_dict(),
+                            "collected_frames": {"collected_frames": collected_frames},
+                    }
+                    torch.save(savestate, f"training_snapshot_{collected_frames}.pt")
 
         if logger:
             metrics_to_log.update(timeit.todict(prefix="time"))

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import torch.nn
 import torch.optim
-from tensordict.nn import TensorDictModule
+from tensordict.nn import TensorDictModule, TensorDictSequential
 from torchrl.data.tensor_specs import CategoricalBox
 from torchrl.envs import (
     CatFrames,
@@ -16,6 +16,7 @@ from torchrl.envs import (
     ExplorationType,
     GrayScale,
     GymEnv,
+    GymWrapper,
     NoopResetEnv,
     ParallelEnv,
     RenameTransform,
@@ -26,6 +27,8 @@ from torchrl.envs import (
     ToTensorImage,
     TransformedEnv,
     VecNorm,
+    InitTracker,
+    default_info_dict_reader
 )
 from torchrl.modules import (
     ActorValueOperator,
@@ -36,33 +39,42 @@ from torchrl.modules import (
     ValueOperator,
 )
 from torchrl.record import VideoRecorder
-
-from sokoban_gym import SokobanEnv
+from torchrl.modules import GRU, GRUModule, LSTMModule
+import gym
+import gym_sokoban
+#from sokoban_gym import SokobanEnv
 # ====================================================================
 # Environment utils
 # --------------------------------------------------------------------
 
 
-def make_base_env(is_test=False):
-    env = SokobanEnv()
+def make_base_env(env_name: str, device="cpu", from_pixels: bool = True, is_test=False):
+    env = gym.make(env_name)
+    env = GymWrapper(env)
+    reader = default_info_dict_reader(["boxes_on_target", "num_boxes"])  
+    env.set_info_dict_reader(reader)
 
+    #env = GymEnv(env_name, device=device, from_pixels=from_pixels, pixels_only=False)
     return env
 
 
-def make_parallel_env(num_envs, device, is_test=False):
+def make_parallel_env(num_envs, env_name, device, is_test=False, transform = None):
     env = ParallelEnv(
         num_envs,
-        EnvCreator(lambda: make_base_env()),
+        EnvCreator(lambda: make_base_env(env_name)),
         serial_for_single=True,
         device=device,
     )
     env = TransformedEnv(env)
-    env.append_transform(RenameTransform(in_keys=["observed_room"], out_keys=["observed_room_orig"], create_copy=True))
+    env.append_transform(InitTracker())
+    env.append_transform(RenameTransform(in_keys=["pixels"], out_keys=["observed_room_orig"], create_copy=True))
     env.append_transform(ToTensorImage(in_keys=["observed_room_orig"], out_keys=["observed_room_img"]))
     env.append_transform(GrayScale("observed_room_img"))
     env.append_transform(RewardSum())
     env.append_transform(StepCounter(max_steps=4500))
     env.append_transform(VecNorm(in_keys=["observed_room_img"]))
+    if transform is not None:
+        env.append_transform(transform)
     return env
 
 
@@ -79,7 +91,7 @@ def make_ppo_modules_pixels(proof_environment, device):
     # Define distribution class and kwargs
     if isinstance(proof_environment.action_spec_unbatched.space, CategoricalBox):
         num_outputs = proof_environment.action_spec_unbatched.space.n
-        distribution_class = torch.distributions.Categorical
+        distribution_class = torch.distributions.OneHotCategorical
         distribution_kwargs = {}
     else:  # is ContinuousBox
         num_outputs = proof_environment.action_spec_unbatched.shape
@@ -101,27 +113,45 @@ def make_ppo_modules_pixels(proof_environment, device):
         paddings=[1, 1],
         device=device,
     )
+    
     common_cnn_output = common_cnn(torch.ones(input_shape, device=device))
-    common_mlp = MLP(
-        in_features=common_cnn_output.shape[-1],
+    
+    encoder_module = TensorDictModule(
+        module=common_cnn,
+        in_keys=in_keys,
+        out_keys=["encoded_observation"]
+    )
+
+    recurrent_body = GRUModule(
+        input_size = common_cnn_output.shape[-1],
+        hidden_size = 32,
+        in_key="encoded_observation",#, "recurrent_state", "is_init"],
+        out_key="intermediate",# ("next", "recurrent_state")],
+       # default_recurrent_mode=True,
+        device=device
+    )
+
+    feature_mlp = MLP(
+        in_features=32,
         activation_class=torch.nn.ReLU,
         activate_last_layer=True,
-        out_features=256,
+        out_features=64,
         num_cells=[],
         device=device,
     )
-    common_mlp_output = common_mlp(common_cnn_output)
 
     # Define shared net as TensorDictModule
-    common_module = TensorDictModule(
-        module=torch.nn.Sequential(common_cnn, common_mlp),
-        in_keys=in_keys,
+    feature_module = TensorDictModule(
+        module=feature_mlp,
+        in_keys=["intermediate"],
         out_keys=["common_features"],
     )
 
+    common_module = TensorDictSequential(encoder_module, recurrent_body, feature_module)
+
     # Define on head for the policy
     policy_net = MLP(
-        in_features=common_mlp_output.shape[-1],
+        in_features=64,
         out_features=num_outputs,
         activation_class=torch.nn.ReLU,
         num_cells=[],
@@ -147,7 +177,7 @@ def make_ppo_modules_pixels(proof_environment, device):
     # Define another head for the value
     value_net = MLP(
         activation_class=torch.nn.ReLU,
-        in_features=common_mlp_output.shape[-1],
+        in_features=64,
         out_features=1,
         num_cells=[],
         device=device,
@@ -157,12 +187,12 @@ def make_ppo_modules_pixels(proof_environment, device):
         in_keys=["common_features"],
     )
 
-    return common_module, policy_module, value_module
+    return common_module, policy_module, value_module, recurrent_body
 
 
-def make_ppo_models(device):
-    proof_environment = make_parallel_env(1, device=device)
-    common_module, policy_module, value_module = make_ppo_modules_pixels(
+def make_ppo_models(cfg, device):
+    proof_environment = make_parallel_env(1, cfg.env.env_name, device=device)
+    common_module, policy_module, value_module, recurrent_body = make_ppo_modules_pixels(
         proof_environment,
         device=device,
     )
@@ -184,7 +214,7 @@ def make_ppo_models(device):
 
     del proof_environment
 
-    return actor, critic
+    return actor, critic, recurrent_body
 
 
 # ====================================================================
@@ -210,8 +240,8 @@ def eval_model(actor, test_env, num_episodes=3):
         )
         test_env.apply(dump_video)
         reward = td_test["next", "episode_reward"][td_test["next", "done"]]
-        episode_initial_status = td_test['next', 'params', 'num_boxes'].unsqueeze(-1)[td_test["next", "terminated"]]
-        episode_completion_status = td_test['next', 'boxes_on_target'][td_test["next", "terminated"]]
+        episode_initial_status = td_test['num_boxes'].unsqueeze(-1)[td_test["next", "done"]]
+        episode_completion_status = td_test['next', 'boxes_on_target'].unsqueeze(-1)[td_test["next", "done"]]
         episode_to_go = episode_initial_status - episode_completion_status
         episodes_completed = (episode_to_go == 0).float().sum()
         episode_partial_completion = episode_completion_status / episode_initial_status

@@ -17,7 +17,7 @@ from torchrl.envs import (
     StepCounter,
     TransformedEnv,
     VecNorm,
-    InitTracker,
+    InitTracker
 )
 from torchrl.envs.libs.gym import GymEnv
 from torchrl.modules import MLP, ProbabilisticActor, TanhNormal, ValueOperator
@@ -26,11 +26,6 @@ from torch.distributions import Categorical
 from torchrl.modules import OneHotCategorical
 from torchrl.modules import GRU, GRUModule, LSTMModule
 from gru import GRU
-#from prediction_test.mingru_fast import MinGRU
-from prediction_test.minlstm_fast import MinGRU, MinLSTM
-from torchrl.envs.transforms import TensorDictPrimer
-from torchrl.data.tensor_specs import Unbounded
-
 # ====================================================================
 # Environment utils
 # --------------------------------------------------------------------
@@ -45,15 +40,7 @@ def make_env(env_name="HalfCheetah-v4", device="cpu", from_pixels: bool = False,
     env.append_transform(RewardSum())
     env.append_transform(StepCounter())
     if rnn is not None:
-        env.append_transform(TensorDictPrimer(
-            {
-                
-                "recurrent_state": Unbounded(shape=(32)),
-                #"recurrent_state_2": Unbounded(shape=(32)),
-            },
-            expand_specs=True,
-        ))
-        #env.append_transform(rnn.make_tensordict_primer())
+        env.append_transform(rnn.make_tensordict_primer())
     return env
 
 
@@ -86,30 +73,15 @@ def make_ppo_models_state(proof_environment, device):
         in_keys=["observation"],
         out_keys=["encoded_observation"]
     )
-    # recurrent_body = GRUModule(
-    #     input_size = 64,
-    #     hidden_size = 32,
-        
-    #     in_key="encoded_observation",#, "recurrent_state", "is_init"],
-    #     out_key="intermediate",# ("next", "recurrent_state")],
-    #    # default_recurrent_mode=True,
-    #     device=device
-    # )
-
-    recurrent_net = MinGRU(input_dim=64, hidden_dim=32, output_dim=32, device=device)
-    recurrent_body = TensorDictModule(
-        module=recurrent_net,
-        in_keys=["encoded_observation", "is_init", "recurrent_state"],
-        out_keys=["intermediate", ("next", "recurrent_state")],
+    recurrent_body = GRUModule(
+        input_size = 64,
+        hidden_size = 32,
+        in_key="encoded_observation",#, "recurrent_state", "is_init"],
+        out_key="intermediate",# ("next", "recurrent_state")],
+       # default_recurrent_mode=True,
+        device=device
     )
-    # recurrent_net_2 = MinGRU(input_dim=32, hidden_dim=32, output_dim=32, device=device)
-    # recurrent_body_2 = TensorDictModule(
-    #     module=recurrent_net_2,
-    #     in_keys=["intermediate_1", "is_init", "recurrent_state_2"],
-    #     out_keys=["intermediate", ("next", "recurrent_state_2")],
-    # )
 
-    #recurrent_body = TensorDictSequential(recurrent_body_1, recurrent_body_2)
     policy_mlp = MLP(
         in_features = 32,
        # activation_class=torch.nn.Tanh,

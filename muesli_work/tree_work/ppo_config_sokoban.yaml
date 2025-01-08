@@ -1,7 +1,7 @@
 # Environment
 env:
-  env_name: SokobanEnv-v4
-  num_envs: 8
+  env_name: Sokoban-small-v0
+  num_envs: 1
   
 # collector
 collector:
@@ -17,6 +17,7 @@ logger:
   test_interval: 100_000
   num_test_episodes: 3
   video: False
+  mode: online
 
 # Optim
 optim:
@@ -25,13 +26,13 @@ optim:
   weight_decay: 0.0
   max_grad_norm: 0.5
   anneal_lr: True
-  device:
+  device: 
 
 # loss
 loss:
   gamma: 1.0
-  mini_batch_size: 1024
-  ppo_epochs: 3
+  mini_batch_size: 32 #we need to chunk these..
+  ppo_epochs: 10
   gae_lambda: 0.95
   clip_epsilon: 0.1
   anneal_clip_epsilon: True
