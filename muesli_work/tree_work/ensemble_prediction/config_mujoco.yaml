@@ -1,19 +1,20 @@
 # task and env
 env:
-  env_name: CartPole-v1
+  env_name: Hopper-v4
 
 # collector
 collector:
   frames_per_batch: 2048
-  total_frames: 1_000_000
+  total_frames: 2_000_000
 
 # logger
 logger:
   backend: wandb
-  project_name: ppo_recurrent
+  project_name: ensemble_prediction
   group_name: null
-  exp_name: baseline
-  test_interval: 50_000
+  exp_name: no_reward
+  test_interval: 100_000
+  save_interval: 10_000
   num_test_episodes: 5
   video: False
   mode: online
@@ -22,8 +23,8 @@ logger:
 optim:
   lr: 3e-4
   weight_decay: 0.0
-  anneal_lr: False
-  device:
+  anneal_lr: True
+  device: cpu
 
 # loss
 loss:
@@ -33,9 +34,12 @@ loss:
   gae_lambda: 0.95
   clip_epsilon: 0.2
   anneal_clip_epsilon: False
-  critic_coef: 0.5
-  entropy_coef: 0.01
+  critic_coef: 0.25
+  entropy_coef: 0.0
+  kalman_coef: 0.001
   loss_critic_type: l2
+  add_kalman_reward: False
+  dynamics_coef: 0.001
 
 compile:
   compile: False

@@ -47,6 +47,7 @@ from torchrl.objectives.value import (
     VTrace,
 )
 
+from dynamics_prediction import compute_ensemble_disagreement, compute_jacobian_norm_ensemble
 
 class PPOLoss(LossModule):
     """A parent PPO loss class.
@@ -785,27 +786,39 @@ class ClipPPOLoss(PPOLoss):
 
     actor_network: TensorDictModule
     critic_network: TensorDictModule
+    dynamics_network: TensorDictModule
+    kalman_network: TensorDictModule
     actor_network_params: TensorDictParams
     critic_network_params: TensorDictParams
+    kalman_network_params: TensorDictParams
+    dynamics_network_params: TensorDictParams
     target_actor_network_params: TensorDictParams
     target_critic_network_params: TensorDictParams
+    target_dynamics_network_params: TensorDictParams
+    target_kalman_network_params: TensorDictParams
 
     def __init__(
         self,
         actor_network: ProbabilisticTensorDictSequential | None = None,
         critic_network: TensorDictModule | None = None,
+        kalman_network: TensorDictModule | None = None,
+        dynamics_network: TensorDictModule | None = None,
+        policy_calculation_module: TensorDictModule | None = None,
         *,
         clip_epsilon: float = 0.2,
         entropy_bonus: bool = True,
         samples_mc_entropy: int = 1,
         entropy_coef: float = 0.01,
         critic_coef: float = 1.0,
+        kalman_coef: float = 1.0,
+        dynamics_coef: float = 1.0,
         loss_critic_type: str = "smooth_l1",
         normalize_advantage: bool = False,
         gamma: float = None,
         separate_losses: bool = False,
         reduction: str = None,
         clip_value: bool | float | None = None,
+        functional: bool = True,
         **kwargs,
     ):
         # Define clipping of the value loss
@@ -833,6 +846,33 @@ class ClipPPOLoss(PPOLoss):
         else:
             device = None
         self.register_buffer("clip_epsilon", torch.tensor(clip_epsilon, device=device))
+        # if functional:
+        #     self.convert_to_functional(kalman_network, "kalman_network")
+        # else:
+        #     self.kalman_network = kalman_network
+        #     self.kalman_network_params = None
+        #     self.target_kalman_network_params = None
+        if functional:
+            self.convert_to_functional(dynamics_network, "dynamics_network")
+        else:
+            self.dynamics_network = dynamics_network
+            self.dynamics_network_params = None
+            self.target_dynamics_network_params = None
+        self.policy_calculation_module = policy_calculation_module
+
+        if kalman_coef is not None:
+            self.register_buffer(
+                "kalman_coef", torch.tensor(kalman_coef, device=device)
+            )
+        else:
+            self.kalman_coef = None
+
+        if dynamics_coef is not None:
+            self.register_buffer(
+                "dynamics_coef", torch.tensor(dynamics_coef, device=device)
+            )
+        else:
+            self.dynamics_coef = None
 
     @property
     def _clip_bounds(self):
@@ -844,7 +884,7 @@ class ClipPPOLoss(PPOLoss):
     @property
     def out_keys(self):
         if self._out_keys is None:
-            keys = ["loss_objective", "clip_fraction"]
+            keys = ["loss_objective", "clip_fraction", "loss_kalman"]
             if self.entropy_bonus:
                 keys.extend(["entropy", "loss_entropy"])
             if self.loss_critic:
@@ -858,11 +898,47 @@ class ClipPPOLoss(PPOLoss):
     @out_keys.setter
     def out_keys(self, values):
         self._out_keys = values
+    
+    def smooth_deadband_loss(self, y, y_star, epsilon=0.1, delta=0.01):
+        error = torch.abs(y - y_star)
+        smooth_factor = torch.nn.functional.sigmoid((error - epsilon) / delta)
+        loss = 0.5 * (smooth_factor * (error - epsilon))**2
+        return torch.where(error <= epsilon, torch.zeros_like(loss), loss)
+
+    def asymmetric_smooth_deadband_loss(self, y, y_star, epsilon=0.1, delta_below=0.05, delta_above=0.01):
+        error = y - y_star
+        abs_error = torch.abs(error)
+        
+        # Smooth factor for below and above
+        smooth_below = torch.nn.functional.sigmoid((y_star - y - epsilon) / delta_below)
+        smooth_above = torch.nn.functional.sigmoid((y - y_star - epsilon) / delta_above)
+        
+        # Loss computation
+        below_loss = 0.5 * (smooth_below * (y_star - y - epsilon))**2
+        above_loss = 0.5 * (smooth_above * (y - y_star - epsilon))**2
+        
+        # Apply conditions
+        loss = torch.where(abs_error <= epsilon, 
+                        torch.zeros_like(error), 
+                        torch.where(y < y_star, below_loss, above_loss))
+        return loss
 
     @dispatch
     def forward(self, tensordict: TensorDictBase) -> TensorDictBase:
+        import math
         tensordict = tensordict.clone(False)
-        invalid_sample_count = torch.sum((~tensordict["valid_samples"]).float()).int().item()
+        #add the dynamics loss first.
+        with self.dynamics_network_params.to_module(
+            self.dynamics_network
+        ) if self.functional else contextlib.nullcontext():
+            dynamics_td = self.dynamics_network(tensordict.select("observation", "action"))
+            dynamics_jacobian_norm_unnormed = compute_jacobian_norm_ensemble(self.dynamics_network, tensordict).detach().unsqueeze(-1)
+            dynamics_jacobian_norm = dynamics_jacobian_norm_unnormed * 1 / math.sqrt(tensordict["observation"].shape[-1])
+            dynamics_variance = compute_ensemble_disagreement(dynamics_td["predicted_state"].detach()) / tensordict["observation"].shape[-1]
+        update_index = torch.randint(5, size=()).item()
+        target_state = tensordict["next", "observation"]
+        predicted_state = dynamics_td["predicted_state"][..., update_index]
+        dynamics_loss = torch.nn.functional.mse_loss(predicted_state, target_state, reduction="none").mean(-1, keepdim=True)
 
         advantage = tensordict.get(self.tensor_keys.advantage, None)
         if advantage is None:
@@ -877,6 +953,7 @@ class ClipPPOLoss(PPOLoss):
             scale = advantage.std().clamp_min(1e-6)
             advantage = (advantage - loc) / scale
 
+        
         log_weight, dist, kl_approx = self._log_weight(tensordict)
         # ESS for logging
         with torch.no_grad():
@@ -885,29 +962,85 @@ class ClipPPOLoss(PPOLoss):
             # of the weights.
             lw = log_weight.squeeze()
             ess = (2 * lw.logsumexp(0) - (2 * lw).logsumexp(0)).exp()
-            batch = log_weight.shape[0] - invalid_sample_count
+            batch = log_weight.shape[0]
 
         gain1 = log_weight.exp() * advantage
+
         log_weight_clip = log_weight.clamp(*self._clip_bounds)
         clip_fraction = (log_weight_clip != log_weight).to(log_weight.dtype).mean()
         ratio = log_weight_clip.exp()
         gain2 = ratio * advantage
 
         gain = torch.stack([gain1, gain2], -1).min(dim=-1)[0]
-        td_out = TensorDict({"loss_objective": -gain[invalid_sample_count:]}, batch_size=[])
+        dynamics_jacobian_norm_inv = 1 / (dynamics_jacobian_norm + 1e-4)
+        dynamics_jacobian_norm_unnormed_inv = 1 / (dynamics_jacobian_norm_unnormed + 1e-4)
+        state = tensordict.select("observation")
+        state["observation"].requires_grad_(True)
+        output = self.policy_calculation_module(state)
+
+        jacobian = torch.autograd.grad(
+            outputs=output["loc"],  # sum to handle batch-wise differentiation
+            inputs=state["observation"],
+            grad_outputs=torch.ones_like(output["loc"]),
+            create_graph=True,
+            retain_graph=True,
+            allow_unused=True
+        )[0]
+
+            #         outputs=output_td["predicted_state"],
+            # inputs=input_td["observation"],
+            # grad_outputs=torch.ones_like(output_td["predicted_state"]),
+            # create_graph=True,
+            # retain_graph=True,
+            # allow_unused=True
+        
+        policy_jacobian_norm_unnormed = jacobian.norm(p='fro', dim=-1, keepdim=True) 
+        policy_jacobian_norm = policy_jacobian_norm_unnormed * 1 / math.sqrt(tensordict["action"].shape[-1])
+        #reg_loss = 0.01 * 1 / torch.sqrt(disagreement) * torch.nn.functional.mse_loss(lambda_reg * jacobian_norm, torch.ones_like(gain), reduction="none") #ok, next is to scale with expected uncertainty. scaled by dims, again.
+        #reg_loss = 0.0001 * 1 / torch.sqrt(disagreement) * torch.nn.functional.mse_loss(torch.clamp(lambda_reg * jacobian_norm, min=1), torch.ones_like(gain), reduction="none") #ok, next is to scale with expected uncertainty. scaled by dims, again.
+        jacobian_norm_ratio = dynamics_jacobian_norm_inv * policy_jacobian_norm 
+        jacobian_norm_ratio_unnormed = dynamics_jacobian_norm_unnormed_inv * policy_jacobian_norm_unnormed
+        jacobian_norm_error = jacobian_norm_ratio #- 0.02 * torch.ones_like(gain)
+
+        #delta = self.smooth_deadband_loss(lambda_reg * jacobian_norm, torch.ones_like(gain), epsilon=0.5)
+        #delta = self.asymmetric_smooth_deadband_loss(lambda_reg * jacobian_norm, torch.ones_like(gain), epsilon=0.05)
+        ##### CURRENTLY RUNNING ##### Best "compromise" so far. Both environments reach acceptable results.
+        # try with lower/higher alpha
+        # try without uncertainty factor
+        #transformed = torch.nn.functional.elu(delta, alpha=0.2)
+        #reg_loss = 0.0001 * 1 / torch.sqrt(disagreement) * error.pow(2)
+        reg_loss = 0.1 * jacobian_norm_error.pow(2)
+        ##### END OF CURRENTLY RUNNING #####
+#        reg_loss = 0.0001 * 1 / torch.sqrt(disagreement) * torch.nn.functional.mse_loss(torch.nn.functional.elu(torch.clamp(lambda_reg * jacobian_norm, min=1), torch.ones_like(gain), reduction="none") #ok, next is to scale with expected uncertainty. scaled by dims, again.
+
+        gain = gain - reg_loss
+
+        td_out = TensorDict({"loss_objective": -gain}, batch_size=[])
+        td_out.set("loss_reg", reg_loss)
+        td_out.set("loss_dynamics", dynamics_loss)
         td_out.set("clip_fraction", clip_fraction)
+        td_out.set("loss_jacobian_norm", reg_loss)
+        td_out.set("jacobian_norm_ratio", jacobian_norm_ratio)
+        td_out.set("jacobian_norm_dynamics", dynamics_jacobian_norm)
+        td_out.set("jacobian_norm_policy", policy_jacobian_norm)
+        td_out.set("jacobian_norm_dynamics_unnormed", dynamics_jacobian_norm_unnormed)
+        td_out.set("jacobian_norm_policy_unnormed", policy_jacobian_norm_unnormed)
+        td_out.set("jacobian_norm_ratio_unnormed", jacobian_norm_ratio_unnormed)
+        td_out.set("dynamics_variance", dynamics_variance)
 
         if self.entropy_bonus:
             entropy = self.get_entropy_bonus(dist)
             td_out.set("entropy", entropy.detach().mean())  # for logging
             td_out.set("kl_approx", kl_approx.detach().mean())  # for logging
-            td_out.set("loss_entropy", -self.entropy_coef * entropy[invalid_sample_count:])
+            td_out.set("loss_entropy", -self.entropy_coef * entropy)
         if self.critic_coef is not None:
             loss_critic, value_clip_fraction = self.loss_critic(tensordict)
-
-            td_out.set("loss_critic", loss_critic[invalid_sample_count:])
+            td_out.set("loss_critic", loss_critic)
             if value_clip_fraction is not None:
                 td_out.set("value_clip_fraction", value_clip_fraction)
+        # if self.kalman_coef is not None:
+        #     loss_kalman = self.loss_kalman(tensordict)
+        #     td_out.set("loss_kalman", loss_kalman)
 
         td_out.set("ESS", _reduce(ess, self.reduction) / batch)
         td_out = td_out.named_apply(
@@ -918,6 +1051,18 @@ class ClipPPOLoss(PPOLoss):
         )
         return td_out
 
+    def loss_kalman(self, tensordict: TensorDictBase) -> torch.Tensor:
+        """Returns the kalman loss multiplied by ``kalman_coef``, if it is not ``None``."""
+        # TODO: if the advantage is gathered by forward, this introduces an
+        # overhead that we could easily reduce.
+        with self.kalman_network_params.to_module(
+            self.kalman_network
+        ) if self.functional else contextlib.nullcontext():
+            kalman_td = self.kalman_network(tensordict)
+        #lets just use the current values, for now.
+        loss_value = torch.nn.functional.mse_loss(kalman_td["next", "prediction_error"], torch.zeros_like(kalman_td["next", "prediction_error"]), reduction="none")
+
+        return loss_value
 
 class KLPENPPOLoss(PPOLoss):
     """KL Penalty PPO loss.

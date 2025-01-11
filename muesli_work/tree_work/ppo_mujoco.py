@@ -29,7 +29,6 @@ def main(cfg: "DictConfig"):  # noqa: F821
     from torchrl.collectors import SyncDataCollector
     from torchrl.data import LazyTensorStorage, TensorDictReplayBuffer
     from torchrl.envs.utils import step_mdp, check_env_specs
-    #from torchrl.data.replay_buffers.samplers import SamplerWithoutReplacement
     from torchrl.data.replay_buffers.samplers import SamplerWithoutReplacement, SliceSamplerWithoutReplacement
     from torchrl.envs import ExplorationType, set_exploration_type
     from torchrl.objectives import group_optimizers
@@ -39,6 +38,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     from utils_mujoco import eval_model, make_env, make_ppo_models
     from ppo_loss import ClipPPOLoss
     from torchrl.modules import set_recurrent_mode
+    from tensordict import pad
 
     torch.set_float32_matmul_precision("high")
 
@@ -50,7 +50,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
             device = "cpu"
     #device = "cpu"
     device = torch.device(device)
-    
+    cfg_loss_mini_batch_size = cfg.loss.mini_batch_size
     num_mini_batches = cfg.collector.frames_per_batch // cfg.loss.mini_batch_size
     total_network_updates = (
         (cfg.collector.total_frames // cfg.collector.frames_per_batch)
@@ -88,8 +88,10 @@ def main(cfg: "DictConfig"):  # noqa: F821
     )
 
     # Create data buffer
-    #sampler = SliceSamplerWithoutReplacement(num_slices=4, strict_length=False)
-    sampler = SamplerWithoutReplacement(shuffle=False)
+    #num_slices = 16
+    #slice_length = num_mini_batches // num_slices
+    sampler = SliceSamplerWithoutReplacement(num_slices=16, strict_length=False)
+    #sampler = SamplerWithoutReplacement(shuffle=False)
     data_buffer = TensorDictReplayBuffer(
         storage=LazyTensorStorage(
             cfg.collector.frames_per_batch,
@@ -249,6 +251,9 @@ def main(cfg: "DictConfig"):  # noqa: F821
                     data_buffer.extend(data_reshape)
 
                 for k, batch in enumerate(data_buffer):
+                    batch["valid_samples"] = torch.ones(batch.shape, dtype=torch.bool, device=device)
+                    batch = pad(batch, [cfg_loss_mini_batch_size - batch.shape[0], 0]) 
+                    batch['collector', 'traj_ids'][~batch["valid_samples"]] -= 1
                     with timeit("update"):
                         torch.compiler.cudagraph_mark_step_begin()
                         loss, num_network_updates = update(

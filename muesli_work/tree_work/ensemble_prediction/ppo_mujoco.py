@@ -5,7 +5,7 @@
 
 """
 This script reproduces the Proximal Policy Optimization (PPO) Algorithm
-results from Schulman et al. 2017 for the Atari Environments.
+results from Schulman et al. 2017 for the on MuJoCo Environments.
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import hydra
 from torchrl._utils import compile_with_warmup
 
 
-@hydra.main(config_path="", config_name="ppo_config_sokoban", version_base="1.1")
+@hydra.main(config_path="", config_name="config_mujoco", version_base="1.1")
 def main(cfg: "DictConfig"):  # noqa: F821
 
     import torch.optim
@@ -24,23 +24,19 @@ def main(cfg: "DictConfig"):  # noqa: F821
 
     from tensordict import TensorDict
     from tensordict.nn import CudaGraphModule
-
+    from torchrl.objectives import ClipPPOLoss
     from torchrl._utils import timeit
     from torchrl.collectors import SyncDataCollector
     from torchrl.data import LazyTensorStorage, TensorDictReplayBuffer
-    from torchrl.data.replay_buffers.samplers import SliceSamplerWithoutReplacement
+    from torchrl.data.replay_buffers.samplers import SamplerWithoutReplacement
     from torchrl.envs import ExplorationType, set_exploration_type
-    #from torchrl.objectives import ClipPPOLoss
+    from torchrl.objectives import group_optimizers
     from torchrl.objectives.value.advantages import GAE
     from torchrl.record import VideoRecorder
     from torchrl.record.loggers import generate_exp_name, get_logger
-    from utils_sokoban import eval_model, make_parallel_env, make_ppo_models
-    from torchrl.envs.utils import step_mdp
-    import gym_sokoban
+    from utils_mujoco import eval_model, make_env, make_ppo_models, load_model_state
     from ppo_loss import ClipPPOLoss
-    from tensordict import pad
-    from torchrl.envs.transforms import TensorDictPrimer
-    from torchrl.data.tensor_specs import Unbounded
+    from dynamics_prediction import compute_ensemble_disagreement, compute_jacobian_norm_ensemble
 
     torch.set_float32_matmul_precision("high")
 
@@ -52,11 +48,12 @@ def main(cfg: "DictConfig"):  # noqa: F821
             device = "cpu"
     device = torch.device(device)
 
-    # Correct for frame_skip
-    total_frames = cfg.collector.total_frames 
-    frames_per_batch = cfg.collector.frames_per_batch 
-    mini_batch_size = cfg.loss.mini_batch_size 
-    test_interval = cfg.logger.test_interval 
+    num_mini_batches = cfg.collector.frames_per_batch // cfg.loss.mini_batch_size
+    total_network_updates = (
+        (cfg.collector.total_frames // cfg.collector.frames_per_batch)
+        * cfg.loss.ppo_epochs
+        * num_mini_batches
+    )
 
     compile_mode = None
     if cfg.compile.compile:
@@ -67,32 +64,54 @@ def main(cfg: "DictConfig"):  # noqa: F821
             else:
                 compile_mode = "reduce-overhead"
 
-    # Create models (check utils_atari.py)
-    actor, critic, recurrent_module = make_ppo_models(cfg, device=device)
-    # p_env = make_parallel_env(cfg.env.num_envs, device)
-    # td_ = p_env.reset()
-    # done = td_["done"]
-    # for i in range(2000):
-    #     action = p_env.action_spec.sample()
-    #     td_['action'] = action
-    #     td, td_ = p_env.step_and_maybe_reset(td_)
-    #     done = td['next', 'done']
-    #TODO: Add primer support to the minGRU
-    primer = TensorDictPrimer(
-            {
-                
-                "recurrent_state": Unbounded(shape=(32)),
-                #"recurrent_state_2": Unbounded(shape=(32)),
-            },
-            expand_specs=True,
-        )
+    # Create models (check utils_mujoco.py)
+    actor, critic, policy, dynamics, policy_calculation_module = make_ppo_models(cfg.env.env_name, device=device)
+    #actor, critic, policy = make_ppo_models(cfg.env.env_name, device=device)
+    
+    # Create optimizers
+    actor_optim = torch.optim.Adam(
+        policy.parameters(), lr=torch.tensor(cfg.optim.lr, device=device), eps=1e-5
+    )
+    critic_optim = torch.optim.Adam(
+        critic.parameters(), lr=torch.tensor(cfg.optim.lr, device=device), eps=1e-5
+    )
+    dynamics_optim = torch.optim.Adam(
+        dynamics.parameters(), lr=torch.tensor(cfg.optim.lr * 0.1, device=device), eps=1e-5
+    )
+    optim = group_optimizers(actor_optim, critic_optim, dynamics_optim)#,  kalman_optim)
+    del actor_optim, critic_optim, dynamics_optim
+
+    collected_frames = 0
+    loaded_frames = 0
+
+    load_model = False
+    if load_model:
+        model_dir="2025-01-08/01-07-38/"
+        model_name = "training_snapshot_12288"
+        loaded_state = load_model_state(model_name, model_dir)
+
+        policy_state = loaded_state['model_policy']
+        critic_state = loaded_state['model_critic']
+        dynamics_state = loaded_state['model_dynamics']
+        optim_state = loaded_state['optimizer_state']
+
+        collected_frames = loaded_state['collected_frames']['collected_frames']
+        loaded_frames = collected_frames
+        policy.load_state_dict(policy_state)
+        critic.load_state_dict(critic_state)
+        dynamics.load_state_dict(dynamics_state)
+        optim.load_state_dict(optim_state)
+
+    frames_remaining = cfg.collector.total_frames - collected_frames
+
+
+
     # Create collector
     collector = SyncDataCollector(
-        create_env_fn=make_parallel_env(cfg.env.num_envs, cfg.env.env_name, device, 
-                                        transform=primer),
+        create_env_fn=make_env(cfg.env.env_name, device),
         policy=actor,
-        frames_per_batch=frames_per_batch,
-        total_frames=total_frames,
+        frames_per_batch=cfg.collector.frames_per_batch,
+        total_frames=frames_remaining,
         device=device,
         max_frames_per_traj=-1,
         compile_policy={"mode": compile_mode, "warmup": 1} if compile_mode else False,
@@ -100,13 +119,15 @@ def main(cfg: "DictConfig"):  # noqa: F821
     )
 
     # Create data buffer
-    sampler = SliceSamplerWithoutReplacement(num_slices=32, strict_length=False)
+    sampler = SamplerWithoutReplacement()
     data_buffer = TensorDictReplayBuffer(
         storage=LazyTensorStorage(
-            frames_per_batch, compilable=cfg.compile.compile, device=device
+            cfg.collector.frames_per_batch,
+            compilable=cfg.compile.compile,
+            device=device,
         ),
         sampler=sampler,
-        batch_size=mini_batch_size,
+        batch_size=cfg.loss.mini_batch_size,
         compilable=cfg.compile.compile,
     )
 
@@ -119,27 +140,26 @@ def main(cfg: "DictConfig"):  # noqa: F821
         device=device,
         vectorized=not cfg.compile.compile,
     )
+
     loss_module = ClipPPOLoss(
-        actor_network=actor,
+        actor_network=policy,
         critic_network=critic,
+        dynamics_network=dynamics,
+        policy_calculation_module = policy_calculation_module,
         clip_epsilon=cfg.loss.clip_epsilon,
         loss_critic_type=cfg.loss.loss_critic_type,
         entropy_coef=cfg.loss.entropy_coef,
         critic_coef=cfg.loss.critic_coef,
+        dynamics_coef=cfg.loss.dynamics_coef,
         normalize_advantage=True,
     )
-    # Create optimizer
-    optim = torch.optim.Adam(
-        loss_module.parameters(),
-        lr=cfg.optim.lr,
-        weight_decay=cfg.optim.weight_decay,
-        eps=cfg.optim.eps,
-    )
+
+
 
     # Create logger
     logger = None
     if cfg.logger.backend:
-        exp_name = generate_exp_name("PPO", f"{cfg.logger.exp_name}_sokoban7x7")
+        exp_name = generate_exp_name("PPO", f"{cfg.logger.exp_name}_{cfg.env.env_name}")
         logger = get_logger(
             cfg.logger.backend,
             logger_name="ppo",
@@ -148,7 +168,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 "config": dict(cfg),
                 "project": cfg.logger.project_name,
                 "group": cfg.logger.group_name,
-                "mode": cfg.logger.mode,
+                "mode": cfg.logger.mode
             },
         )
         logger_video = cfg.logger.video
@@ -156,21 +176,12 @@ def main(cfg: "DictConfig"):  # noqa: F821
         logger_video = False
 
     # Create test environment
-    test_env = make_parallel_env(1, cfg.env.env_name, device, is_test=True, transform=primer.clone())
+    test_env = make_env(cfg.env.env_name, device, from_pixels=logger_video)
     if logger_video:
         test_env = test_env.append_transform(
-            VideoRecorder(logger, tag="rendering/test", in_keys=["pixels_int"])
+            VideoRecorder(logger, tag="rendering/test", in_keys=["pixels"])
         )
     test_env.eval()
-
-    # Main loop
-    collected_frames = 0
-    num_network_updates = torch.zeros((), dtype=torch.int64, device=device)
-    pbar = tqdm.tqdm(total=total_frames)
-    num_mini_batches = frames_per_batch // mini_batch_size
-    total_network_updates = (
-        (total_frames // frames_per_batch) * cfg.loss.ppo_epochs * num_mini_batches
-    )
 
     def update(batch, num_network_updates):
         optim.zero_grad(set_to_none=True)
@@ -183,17 +194,17 @@ def main(cfg: "DictConfig"):  # noqa: F821
         if cfg_loss_anneal_clip_eps:
             loss_module.clip_epsilon.copy_(cfg_loss_clip_epsilon * alpha)
         num_network_updates = num_network_updates + 1
-        # Get a data batch
-        batch = batch.to(device, non_blocking=True)
 
         # Forward pass PPO loss
         loss = loss_module(batch)
-        loss_sum = loss["loss_critic"] + loss["loss_objective"] + loss["loss_entropy"]
+        critic_loss = loss["loss_critic"]
+        actor_loss = loss["loss_objective"] + loss["loss_entropy"]
+        dynamics_loss = loss["loss_dynamics"]
+        #kalman_loss = loss["loss_kalman"]
+        total_loss = critic_loss + actor_loss + dynamics_loss
+
         # Backward pass
-        loss_sum.backward()
-        torch.nn.utils.clip_grad_norm_(
-            loss_module.parameters(), max_norm=cfg_optim_max_grad_norm
-        )
+        total_loss.backward()
 
         # Update the networks
         optim.step()
@@ -211,16 +222,22 @@ def main(cfg: "DictConfig"):  # noqa: F821
         update = CudaGraphModule(update, in_keys=[], out_keys=[], warmup=5)
         adv_module = CudaGraphModule(adv_module)
 
+    # Main loop
+    collected_frames = 0
+    num_network_updates = torch.zeros((), dtype=torch.int64, device=device)
+    pbar = tqdm.tqdm(total=cfg.collector.total_frames)
+
     # extract cfg variables
     cfg_loss_ppo_epochs = cfg.loss.ppo_epochs
     cfg_optim_anneal_lr = cfg.optim.anneal_lr
-    cfg_optim_lr = cfg.optim.lr
+    cfg_optim_lr = torch.tensor(cfg.optim.lr, device=device)
     cfg_loss_anneal_clip_eps = cfg.loss.anneal_clip_epsilon
     cfg_loss_clip_epsilon = cfg.loss.clip_epsilon
+    cfg_logger_test_interval = cfg.logger.test_interval
+    cfg_logger_save_interval = cfg.logger.save_interval
     cfg_logger_num_test_episodes = cfg.logger.num_test_episodes
-    cfg_optim_max_grad_norm = cfg.optim.max_grad_norm
-    cfg.loss.clip_epsilon = cfg_loss_clip_epsilon
     losses = TensorDict(batch_size=[cfg_loss_ppo_epochs, num_mini_batches])
+    dynamics_results = TensorDict(batch_size=[cfg_loss_ppo_epochs, num_mini_batches])
 
     collector_iter = iter(collector)
     total_iter = len(collector)
@@ -230,27 +247,21 @@ def main(cfg: "DictConfig"):  # noqa: F821
         with timeit("collecting"):
             data = next(collector_iter)
 
+
         metrics_to_log = {}
         frames_in_batch = data.numel()
         collected_frames += frames_in_batch
         pbar.update(frames_in_batch)
 
-        # Get training rewards and episode lengths['params', 'num_boxes']
+        # Get training rewards and episode lengths
         episode_rewards = data["next", "episode_reward"][data["next", "done"]]
         if len(episode_rewards) > 0:
             episode_length = data["next", "step_count"][data["next", "done"]]
-            episode_initial_status = data['num_boxes'].unsqueeze(-1)[data["next", "done"]]
-            episode_completion_status = data['next', 'boxes_on_target'].unsqueeze(-1)[data["next", "done"]]
-            episode_to_go = episode_initial_status - episode_completion_status
-            episodes_completed = (episode_to_go == 0).float().sum().item()
-            episode_partial_completion = episode_completion_status / episode_initial_status
             metrics_to_log.update(
                 {
                     "train/reward": episode_rewards.mean().item(),
                     "train/episode_length": episode_length.sum().item()
                     / len(episode_length),
-                    "train/episode_completion_percentage": (episodes_completed / len(episode_rewards)) * 100.0,
-                    "train/episode_partial_completion_percentage": (episode_partial_completion.sum().item() / len(episode_rewards)) * 100.0,
                 }
             )
 
@@ -263,24 +274,30 @@ def main(cfg: "DictConfig"):  # noqa: F821
                     data = adv_module(data)
                     if compile_mode:
                         data = data.clone()
+
                 with timeit("rb - extend"):
                     # Update the data buffer
                     data_reshape = data.reshape(-1)
                     data_buffer.extend(data_reshape)
 
                 for k, batch in enumerate(data_buffer):
-                    batch["valid_samples"] = torch.ones(batch.shape, dtype=torch.bool, device=device)
-                    batch = pad(batch, [mini_batch_size - batch.shape[0], 0]) 
                     with timeit("update"):
                         torch.compiler.cudagraph_mark_step_begin()
                         loss, num_network_updates = update(
                             batch, num_network_updates=num_network_updates
                         )
-                    loss = loss.clone()
+                        loss = loss.clone()
                     num_network_updates = num_network_updates.clone()
                     losses[j, k] = loss.select(
-                        "loss_critic", "loss_entropy", "loss_objective"
+                        "loss_critic", "loss_entropy", "loss_objective", "loss_dynamics", "loss_reg"
                     )
+                    dynamics_results[j, k] = loss.select(
+                        "jacobian_norm_ratio", "jacobian_norm_dynamics", "jacobian_norm_policy", "jacobian_norm_dynamics_unnormed", "jacobian_norm_policy_unnormed", "jacobian_norm_ratio_unnormed", "dynamics_variance"
+                    )
+
+        dynamics_mean = dynamics_results.apply(lambda x: x.float().mean(), batch_size=[])
+        for key, value in dynamics_mean.items():
+            metrics_to_log.update({f"train/{key}": value.item()})
 
         # Get training losses and times
         losses_mean = losses.apply(lambda x: x.float().mean(), batch_size=[])
@@ -289,7 +306,9 @@ def main(cfg: "DictConfig"):  # noqa: F821
         metrics_to_log.update(
             {
                 "train/lr": loss["alpha"] * cfg_optim_lr,
-                "train/clip_epsilon": loss["alpha"] * cfg_loss_clip_epsilon,
+                "train/clip_epsilon": loss["alpha"] * cfg_loss_clip_epsilon
+                if cfg_loss_anneal_clip_eps
+                else cfg_loss_clip_epsilon,
             }
         )
 
@@ -297,21 +316,31 @@ def main(cfg: "DictConfig"):  # noqa: F821
         with torch.no_grad(), set_exploration_type(
             ExplorationType.DETERMINISTIC
         ), timeit("eval"):
-            if ((i - 1) * frames_in_batch) // test_interval < (
-                i * frames_in_batch
-            ) // test_interval:
+            if ((i - 1) * frames_in_batch + loaded_frames) // cfg_logger_test_interval < (
+               (i * frames_in_batch + loaded_frames)
+            ) // cfg_logger_test_interval:
                 actor.eval()
-                test_rewards, episode_completion_percentage, episode_partial_completion_percentage = eval_model(
+                test_rewards = eval_model(
                     actor, test_env, num_episodes=cfg_logger_num_test_episodes
                 )
                 metrics_to_log.update(
                     {
                         "eval/reward": test_rewards.mean(),
-                        "eval/episode_completion_percentage": episode_completion_percentage.mean(),
-                        "eval/episode_partial_completion_percentage": episode_partial_completion_percentage.mean()
                     }
                 )
                 actor.train()
+
+            if ((i - 1) * frames_in_batch + loaded_frames) // cfg_logger_save_interval < \
+                (i * frames_in_batch + loaded_frames) // cfg_logger_save_interval:
+                    savestate = {
+                            'model_policy': policy.state_dict(),
+                            'model_critic': critic.state_dict(),
+                            'model_dynamics': dynamics.state_dict(),
+                            'optimizer_state': optim.state_dict(),
+                            "collected_frames": {"collected_frames": collected_frames},
+                    }
+                    torch.save(savestate, f"training_snapshot_{collected_frames}.pt")
+
         if logger:
             metrics_to_log.update(timeit.todict(prefix="time"))
             metrics_to_log["time/speed"] = pbar.format_dict["rate"]

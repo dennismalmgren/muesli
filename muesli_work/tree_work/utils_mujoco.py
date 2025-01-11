@@ -49,7 +49,7 @@ def make_env(env_name="HalfCheetah-v4", device="cpu", from_pixels: bool = False,
             {
                 
                 "recurrent_state": Unbounded(shape=(32)),
-                #"recurrent_state_2": Unbounded(shape=(32)),
+                "recurrent_state_2": Unbounded(shape=(32)),
             },
             expand_specs=True,
         ))
@@ -99,17 +99,18 @@ def make_ppo_models_state(proof_environment, device):
     recurrent_net = MinGRU(input_dim=64, hidden_dim=32, output_dim=32, device=device)
     recurrent_body = TensorDictModule(
         module=recurrent_net,
-        in_keys=["encoded_observation", "is_init", "recurrent_state"],
-        out_keys=["intermediate", ("next", "recurrent_state")],
+        in_keys=["encoded_observation", "is_init", "recurrent_state", ("collector", "traj_ids")],
+        out_keys=["intermediate_1", ("next", "recurrent_state")],
     )
-    # recurrent_net_2 = MinGRU(input_dim=32, hidden_dim=32, output_dim=32, device=device)
-    # recurrent_body_2 = TensorDictModule(
-    #     module=recurrent_net_2,
-    #     in_keys=["intermediate_1", "is_init", "recurrent_state_2"],
-    #     out_keys=["intermediate", ("next", "recurrent_state_2")],
-    # )
 
-    #recurrent_body = TensorDictSequential(recurrent_body_1, recurrent_body_2)
+    recurrent_net_2 = MinGRU(input_dim=32, hidden_dim=32, output_dim=32, device=device)
+    recurrent_body_2 = TensorDictModule(
+        module=recurrent_net_2,
+        in_keys=["intermediate_1", "is_init", "recurrent_state_2", ("collector", "traj_ids")],
+        out_keys=["intermediate", ("next", "recurrent_state_2")],
+    )
+
+    recurrent_body = TensorDictSequential(recurrent_body, recurrent_body_2)
     policy_mlp = MLP(
         in_features = 32,
        # activation_class=torch.nn.Tanh,

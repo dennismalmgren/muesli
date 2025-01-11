@@ -42,7 +42,11 @@ from torchrl.record import VideoRecorder
 from torchrl.modules import GRU, GRUModule, LSTMModule
 import gym
 import gym_sokoban
-#from sokoban_gym import SokobanEnv
+
+from torchrl.envs.transforms import TensorDictPrimer
+from torchrl.data.tensor_specs import Unbounded
+from prediction_test.minlstm_fast import MinGRU, MinLSTM
+
 # ====================================================================
 # Environment utils
 # --------------------------------------------------------------------
@@ -50,7 +54,7 @@ import gym_sokoban
 
 def make_base_env(env_name: str, device="cpu", from_pixels: bool = True, is_test=False):
     env = gym.make(env_name)
-    env = GymWrapper(env)
+    env = GymWrapper(env, device="cpu")
     reader = default_info_dict_reader(["boxes_on_target", "num_boxes"])  
     env.set_info_dict_reader(reader)
 
@@ -113,7 +117,10 @@ def make_ppo_modules_pixels(proof_environment, device):
         paddings=[1, 1],
         device=device,
     )
-    
+    #pool = torch.nn.AdaptiveAvgPool2d((1, 1))
+    #out = torch.nn.Linear(32, 32)
+    #common_cnn = torch.nn.Sequential(common_cnn, pool, out)
+
     common_cnn_output = common_cnn(torch.ones(input_shape, device=device))
     
     encoder_module = TensorDictModule(
@@ -122,14 +129,21 @@ def make_ppo_modules_pixels(proof_environment, device):
         out_keys=["encoded_observation"]
     )
 
-    recurrent_body = GRUModule(
-        input_size = common_cnn_output.shape[-1],
-        hidden_size = 32,
-        in_key="encoded_observation",#, "recurrent_state", "is_init"],
-        out_key="intermediate",# ("next", "recurrent_state")],
-       # default_recurrent_mode=True,
-        device=device
+    recurrent_net = MinGRU(input_dim=common_cnn_output.shape[-1], hidden_dim=32, output_dim=32, device=device)
+    recurrent_body = TensorDictModule(
+        module=recurrent_net,
+        in_keys=["encoded_observation", "is_init", "recurrent_state"],
+        out_keys=["intermediate", ("next", "recurrent_state")],
     )
+
+    # recurrent_body = GRUModule(
+    #     input_size = common_cnn_output.shape[-1],
+    #     hidden_size = 32,
+    #     in_key="encoded_observation",#, "recurrent_state", "is_init"],
+    #     out_key="intermediate",# ("next", "recurrent_state")],
+    #    # default_recurrent_mode=True,
+    #     device=device
+    # )
 
     feature_mlp = MLP(
         in_features=32,
