@@ -36,6 +36,8 @@ def associative_scan_no_log_gru(coeffs, values, is_init, h_0):
     output = associative_scan_fn(combine_pairs_no_log, transforms, dim=1, combine_mode="generic")
 
     A_out, B_out = output[..., 0], output[..., 1]
+    A_out = A_out[:, -T:]
+    B_out = B_out[:, -T:]
     h_t = A_out * h_0 + B_out
     return h_t
 
@@ -88,7 +90,7 @@ class MinGRU(nn.Module):
         self.to_hidden_and_gate = nn.Linear(input_dim, hidden_dim * 2, bias = False, device=device)
         self.to_out = nn.Linear(hidden_dim, output_dim, bias=False, device=device) if output_dim else nn.Identity(device=device)
 
-    def forward(self, input: torch.Tensor, is_init: torch.Tensor = None, h_0: torch.Tensor = None):
+    def forward(self, input: torch.Tensor, is_init: torch.Tensor = None, h_0: torch.Tensor = None, traj_ids: torch.Tensor = None):
         r_mode = recurrent_mode()
         # We want inputs to be B x T x dim
         # But h_0 is B x 1 x dim
@@ -109,7 +111,6 @@ class MinGRU(nn.Module):
             if r_mode:
                 input = input.unsqueeze(0) # assume what we got is a sequence
                 if h_0 is not None:
-                    h_0 = h_0[0].unsqueeze(0)
                     h_0 = h_0.unsqueeze(0)
                 if is_init is not None:
                     is_init = is_init.unsqueeze(0)
@@ -126,7 +127,17 @@ class MinGRU(nn.Module):
 
         if h_0 is None:
             h_0 = torch.zeros((batch, 1, self.hidden_dim), dtype=torch.float32, device=input.device)
-        
+        elif r_mode:
+            #h_0 = torch.zeros((batch, 1, self.hidden_dim), dtype=torch.float32, device=input.device)
+            B, T = input.shape[:2]
+            boundaries = torch.where(traj_ids[1:] != traj_ids[:-1])[0] + 1
+            episode_start_indices = torch.cat((torch.tensor([0], device=boundaries.device), boundaries))
+            selected_h0 = h_0[:, episode_start_indices, :]  # Shape: [1, num_episodes, dim]
+            lengths = torch.diff(torch.cat((episode_start_indices, torch.tensor([T], device=boundaries.device))))  # Shape: [num_episodes]
+            repeated_h_0 = torch.cat([selected_h0[:, i:i+1, :].repeat(1, lengths[i], 1) for i in range(len(lengths))], dim=1)  # Shape: [1, T, dim]
+
+            #expect B x T x dim.
+            h_0 = repeated_h_0
         hidden, gate = self.to_hidden_and_gate(input).chunk(2, dim=-1)
 
         if seq_len == 1: #lets run it in inference mode
@@ -137,9 +148,9 @@ class MinGRU(nn.Module):
             if not self.allow_training:
                 raise Exception("Cuda not available, model requires cuda for training")
             gate = gate.sigmoid()
-
+            
             out = associative_scan_no_log_gru(gate, hidden, is_init, h_0)
-            out = out[:, -seq_len:]
+            
 
         if r_mode:
             h_n = out #save all
